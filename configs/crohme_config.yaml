@@ -78,7 +78,7 @@ data:
   dictionary_txt: data/dictionary.txt
   caption_txt: data/crohme_caption.txt
   train_batch_size: 8
-  eval_batch_size: 4
+  eval_batch_size: 8
   num_workers: 4
   scale_aug: false
 
