@@ -158,14 +158,16 @@ class DecodeModel(pl.LightningModule):
                 "(b m) v -> b (m v)",
                 m=reshape_size,
             )
+            
 
             # [b, 2 * beam_size]
             next_token_scores, next_tokens = torch.topk(
                 next_token_scores, 2 * beam_size, dim=1
             )
+            vocab_sz = next_token_logits.shape[-1]
 
-            next_indices = next_tokens // vocab_size
-            next_tokens = next_tokens % vocab_size
+            next_indices = next_tokens // vocab_sz
+            next_tokens = next_tokens % vocab_sz
 
             if cur_len == 1:
                 input_ids = repeat(input_ids, "b l -> (b m) l", m=beam_size)
