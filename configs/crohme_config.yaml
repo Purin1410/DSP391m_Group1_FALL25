@@ -46,7 +46,7 @@ model:
   block_dropout_indices: [2, 3]
 
   # ----- Decoder -----
-  dim_target: 62        # vocab size
+  dim_target: 114        # vocab size
   dim_word: 256
   dim_dec: 512
   dim_attention: 512
