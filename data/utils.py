@@ -147,7 +147,8 @@ def extract_data(
     missing = 0
 
     for line in captions:
-        parts = line.decode().strip().split()
+        # parts = line.strip().split()
+        parts = line.rstrip("\n").split(" ")
         if len(parts) == 0:
             continue
         img_stem = parts[0]          # không nhất thiết đã có .ext
