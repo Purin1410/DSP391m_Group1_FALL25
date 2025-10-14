@@ -6,12 +6,12 @@ import pytorch_lightning as pl
 import torch
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
-
+from utils.generation_utils import DecodeModel
 from models.model import WAPModel
 from utils.utils import ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out
 
 
-class _WAPDecodeAdapter(pl.LightningModule):
+class _WAPDecodeAdapter(DecodeModel):
     def __init__(self, wap: WAPModel, vocab_size: int):
         super().__init__()
         self.wap = wap.eval()
@@ -21,7 +21,6 @@ class _WAPDecodeAdapter(pl.LightningModule):
 
     @torch.no_grad()
     def prepare(self, img: FloatTensor, img_mask: LongTensor):
-        # Lưu sẵn đặc trưng encoder để dùng nhiều bước trong beam search
         _, _, ctx2d, m2d = self.wap.encoder(img, img_mask)
         self.ctx_2d, self.mask_2d = ctx2d, m2d
 
