@@ -167,7 +167,6 @@ def train(cfg: Config):
         check_val_every_n_epoch=cfg.trainer.get("check_val_every_n_epoch", 1),
         val_check_interval=cfg.trainer.get("val_check_interval", None),
         num_sanity_val_steps=cfg.trainer.get("num_sanity_val_steps", 2),
-        enable_checkpointing=True,
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=cfg.trainer.get("log_every_n_steps", 50),
