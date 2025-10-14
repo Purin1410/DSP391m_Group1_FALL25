@@ -194,11 +194,18 @@ class LitWAP(pl.LightningModule):
             momentum=self.hparams.momentum,
             weight_decay=self.hparams.weight_decay,
         )
-        self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        reduce_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode=self.hparams.scheduler.mode,
             factor=self.hparams.scheduler.factor,
             patience=self.hparams.scheduler.patience // self.trainer.check_val_every_n_epoch,
         )
+        self.lr_scheduler = {
+            "scheduler": reduce_scheduler,
+            "monitor": "val_ExpRate",
+            "interval": "epoch",
+            "frequency": self.trainer.check_val_every_n_epoch,
+            "strict": True,
+        }
 
         return {"optimizer": self.optimizer, "lr_scheduler": self.lr_scheduler}
