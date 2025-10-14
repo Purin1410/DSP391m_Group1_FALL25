@@ -4,7 +4,7 @@ import torch
 from data.datamodule import CROHMEDatamodule
 from torch import FloatTensor, LongTensor
 
-vocab = CROHMEDatamodule.vocab
+vocab = CROHMEDatamodule.shared_vocab
 
 # modified from
 # https://github.com/huggingface/transformers/blob/af6e01c5bc39467f1e3ce47a2135fb1777af1db2/src/transformers/generation_beam_search.py#L206

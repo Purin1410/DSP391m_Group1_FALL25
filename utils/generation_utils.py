@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 from data.datamodule import CROHMEDatamodule
-vocab = CROHMEDatamodule.vocab
+vocab = CROHMEDatamodule.shared_vocab
 vocab_size = len(vocab)
 from .utils import Hypothesis, ce_loss, to_tgt_output
 from einops import rearrange

@@ -9,6 +9,7 @@ from .utils import (build_train_dataset,
 from .vocab import Vocab
 
 class CROHMEDatamodule(pl.LightningDataModule):
+    shared_vocab: Optional[Vocab] = None  # class-level cache
     def __init__(
         self,
         config,
@@ -32,7 +33,9 @@ class CROHMEDatamodule(pl.LightningDataModule):
         self.h_hi                       = self.config.data.h_hi
         self.pin_memory                 = self.config.data.pin_memory
         self.persistent_workers         = self.config.data.persistent_workers
-        self.vocab                      = Vocab(dict_path = self.config.data.dictionary_txt)
+        if CROHMEDatamodule.shared_vocab is None:
+            CROHMEDatamodule.shared_vocab = Vocab(dict_path=config.data.dictionary_txt)
+        self.vocab = CROHMEDatamodule.shared_vocab
         
         print(f"Load data from: {self.zipfile_path}")
         

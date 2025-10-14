@@ -3,7 +3,8 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from data.datamodule import CROHMEDatamodule
-vocab = CROHMEDatamodule.vocab
+
+vocab = CROHMEDatamodule.shared_vocab
 
 from einops import rearrange
 from torch import LongTensor
