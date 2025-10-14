@@ -115,7 +115,7 @@ def build_callbacks(cfg: Config) -> List[Callback]:
 
 def train(cfg: Config):
     # 1) seed
-    pl.seed_everything(cfg.get("seed_everything", 1337), workers=True)
+    pl.seed_everything(cfg.get("seed_everything", 7), workers=True)
 
     dm = CROHMEDatamodule(cfg)
     dm.setup(stage="fit")
@@ -125,7 +125,7 @@ def train(cfg: Config):
         lit = LitWAP(
             config=cfg,
             # optimizer
-            learning_rate=cfg.model.get("learning_rate", 3e-4),
+            learning_rate=cfg.model.get("learning_rate", 2e-4),
             weight_decay=cfg.model.get("weight_decay", 0.0),
             betas=tuple(cfg.model.get("betas", [0.9, 0.999])),
             # loss
@@ -163,8 +163,6 @@ def train(cfg: Config):
         gpus=cfg.trainer.get("devices", 1),
         precision=cfg.trainer.get("precision", 32),
         max_epochs=cfg.trainer.get("max_epochs", 100),
-        gradient_clip_val=cfg.trainer.get("gradient_clip_val", 0.0),
-        accumulate_grad_batches=cfg.trainer.get("accumulate_grad_batches", 1),
         deterministic=cfg.trainer.get("deterministic", True),
         check_val_every_n_epoch=cfg.trainer.get("check_val_every_n_epoch", 1),
         val_check_interval=cfg.trainer.get("val_check_interval", None),
