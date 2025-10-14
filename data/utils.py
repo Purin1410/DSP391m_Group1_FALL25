@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import List, Tuple
 from zipfile import ZipFile
 import numpy as np
-import torch
 from PIL import Image
 from torch import FloatTensor, LongTensor
 

@@ -176,11 +176,23 @@ class LitWAP(pl.LightningModule):
 
     # ---------- Optimizer / Scheduler ----------
     def configure_optimizers(self):
-        optimizer = optim.Adam(
+        # self.optimizer = optim.Adam(
+        #     self.parameters(),
+        #     lr=self.hparams.learning_rate,
+        #     betas=self.hparams.betas,
+        #     weight_decay=self.hparams.weight_decay,
+        # )
+        self.optimizer = optim.SGD(
             self.parameters(),
             lr=self.hparams.learning_rate,
-            betas=self.hparams.betas,
-            weight_decay=self.hparams.weight_decay,
+            momentum=self.config.model.momentum,
+            weight_decay=self.config.model.weight_decay,
+        )
+        self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode=self.hparams.scheduler.mode,
+            factor=self.hparams.scheduler.factor,
+            patience=self.config.model.scheduler.patience // self.trainer.check_val_every_n_epoch,
         )
 
-        return optimizer
+        return {"optimizer": self.optimizer, "lr_scheduler": self.lr_scheduler}
