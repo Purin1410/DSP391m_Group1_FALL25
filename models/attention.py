@@ -67,18 +67,15 @@ class CoverageAttention(nn.Module):
         B, C, H, W = context_2d.shape
         
 
-        # Precompute projections
-        ctx_proj = self.ctx_proj(context_2d)                      # [B, attn, H, W]
-        s_proj  = self.state_proj(state).unsqueeze(-1).unsqueeze(-1)  # [B, attn,1,1]
-        e = torch.tanh(ctx_proj + s_proj)                         # [B, attn, H, W]
-
+        # Precompute projections                    # [B, attn, H, W]     
+        preact = self.ctx_proj(context_2d) + self.state_proj(state).unsqueeze(-1).unsqueeze(-1)
         if self.use_coverage:
             if alpha_past is None:
                 alpha_past = context_2d.new_zeros(B, 1, H, W)
-            cov_feat = F.relu(self.coverage_conv(alpha_past))     # [B, cov, H, W]
-            cov_proj = self.coverage_proj(cov_feat)               # [B, attn, H, W]
-            e = torch.tanh(e + cov_proj)
-
+            cov_feat = F.relu(self.coverage_conv(alpha_past))      # như bạn đang làm
+            preact = preact + self.coverage_proj(cov_feat)
+            
+        e = torch.tanh(preact)
         scores = self.v(e).squeeze(1)                             # [B, H, W] 
 
         if mask_2d is not None:

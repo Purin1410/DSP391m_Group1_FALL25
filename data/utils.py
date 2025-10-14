@@ -1,10 +1,14 @@
 from dataclasses import dataclass
-from typing import List, Tuple
-from zipfile import ZipFile
+from typing import List, Tuple, Sequence, Optional
 import numpy as np
 from PIL import Image
 from torch import FloatTensor, LongTensor
+from pathlib import Path
 
+
+# ---------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------
 Data = List[Tuple[str, Image.Image, List[str]]]
 
 
@@ -69,32 +73,105 @@ def data_iterator(
     print("total ", len(feature_total), "batch data loaded")
     return list(zip(fname_total, feature_total, label_total))
 
-def extract_data(archive: ZipFile, dir_name: str, free_memory = False) -> Data: # return data as follow: [(fname1, fea1, lab1), (fname2, fea2, lab2), ...]
-    """Extract all data need for a dataset from zip archive
+# def extract_data(archive: ZipFile, dir_name: str, free_memory = False) -> Data: # return data as follow: [(fname1, fea1, lab1), (fname2, fea2, lab2), ...]
+#     """Extract all data need for a dataset from zip archive
 
-    Args:
-        archive (ZipFile):
-        dir_name (str): dir name in archive zip (eg: train, test_2014......)
+#     Args:
+#         archive (ZipFile):
+#         dir_name (str): dir name in archive zip (eg: train, test_2014......)
 
-    Returns:
-        Data: list of tuple of image and formula
+#     Returns:
+#         Data: list of tuple of image and formula
+#     """
+#     with archive.open(f"data/{dir_name}/caption.txt", "r") as f:
+#         captions = f.readlines()
+#     data = []
+#     for line in captions:
+#         tmp = line.decode().strip().split()
+#         img_name = tmp[0]
+#         formula = tmp[1:]
+#         with archive.open(f"data/{dir_name}/img/{img_name}.bmp", "r") as f:
+#         # move image to memory immediately, avoid lazy loading, which will lead to None pointer error in loading
+#             img = Image.open(f).copy()
+#         data.append((img_name, img, formula))
+#         if free_memory:
+#             del img
+
+#     print(f"Extract data from: {dir_name}, with data size: {len(data)}")
+
+#     return data
+
+def _resolve_image_path(img_dir: Path, stem: str,
+                        exts: Sequence[str] = (".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff")) -> Optional[Path]:
+    p = img_dir / stem
+    if p.exists():
+        return p
+
+    for ext in exts:
+        cand = img_dir / f"{stem}{ext}"
+        if cand.exists():
+            return cand
+    return None
+
+
+def extract_data(
+    root_dir: str,
+    split: str,                     # 'train' hoặc '2014'/'2016'/'2019'
+    caption_name: str = "caption.txt",
+    img_subdir: str = "img",
+    convert_mode: str = "L",        # "L" cho grayscale (giống .bmp gốc)
+    free_memory: bool = False
+) -> Data:
     """
-    with archive.open(f"data/{dir_name}/caption.txt", "r") as f:
+    Read in folder:
+      root_dir/
+        split/
+          img/
+          caption.txt
+
+    caption.txt format: "<image_stem> token1 token2 ..."
+
+    Return: List[(img_name, PIL.Image, token_list)]
+    """
+    split_dir = Path(root_dir) / split
+    cap_path = split_dir / caption_name
+    img_dir = split_dir / img_subdir
+
+    assert cap_path.exists(), f"Not found: {cap_path}"
+    assert img_dir.exists(), f"Not found: {img_dir}"
+
+    with cap_path.open("r", encoding="utf-8") as f:
         captions = f.readlines()
-    data = []
+
+    data: Data = []
+    missing = 0
+
     for line in captions:
-        tmp = line.decode().strip().split()
-        img_name = tmp[0]
-        formula = tmp[1:]
-        with archive.open(f"data/{dir_name}/img/{img_name}.bmp", "r") as f:
-        # move image to memory immediately, avoid lazy loading, which will lead to None pointer error in loading
-            img = Image.open(f).copy()
-        data.append((img_name, img, formula))
+        parts = line.strip().split()
+        if len(parts) == 0:
+            continue
+        img_stem = parts[0]          # không nhất thiết đã có .ext
+        tokens = parts[1:]
+
+        stem_no_ext = Path(img_stem).stem
+        img_path = _resolve_image_path(img_dir, stem_no_ext)
+        if img_path is None:
+            img_path = _resolve_image_path(img_dir, img_stem)
+
+        if img_path is None:
+            missing += 1
+            print(f"[WARN] Missing image for '{img_stem}' in {img_dir}")
+            continue
+
+        with Image.open(img_path) as im:
+            if convert_mode is not None:
+                im = im.convert(convert_mode)
+            im = im.copy()  # materialize in memory
+        data.append((img_path.stem, im, tokens))
         if free_memory:
-            del img
+            del im
 
-    print(f"Extract data from: {dir_name}, with data size: {len(data)}")
-
+    print(f"Extract data from dir: {split_dir}, size: {len(data)} (missing: {missing})")
     return data
 
 @dataclass

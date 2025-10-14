@@ -13,14 +13,16 @@ class ConvBlock(nn.Module):
         super().__init__()
         padding = tuple(k // 2 for k in kernel)  # "same" padding
         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=kernel, padding=padding, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
+        # self.bn = nn.BatchNorm2d(out_ch)
         self.dropout_p = dropout
         self.dropout = nn.Dropout2d(p=dropout) if dropout > 0 else nn.Identity()
         nn.init.kaiming_normal_(self.conv.weight, nonlinearity="relu")
+        if self.conv.bias is not None:
+            nn.init.constant_(self.conv.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
-        x = self.bn(x)
+        # x = self.bn(x)
         x = F.relu(x, inplace=True)
         x = self.dropout(x)
         return x
