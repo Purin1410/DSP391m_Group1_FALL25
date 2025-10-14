@@ -35,15 +35,11 @@ class GradNormCallback(Callback):
 
 
 def build_logger(cfg: Config):
-    backend = cfg.logging.get("backend", "tensorboard")
+    backend = 'wandb'
     name = cfg.logging.get("name", "WAP")
     save_dir = cfg.logging.get("save_dir", "logs")
 
-    if backend == "tensorboard":
-        return TensorBoardLogger(save_dir=save_dir, name=name, default_hp_metric=False)
-    elif backend == "csv":
-        return CSVLogger(save_dir=save_dir, name=name)
-    elif backend == "wandb":
+    if backend == "wandb":
         try:
             from pytorch_lightning.loggers import WandbLogger
             return WandbLogger(
