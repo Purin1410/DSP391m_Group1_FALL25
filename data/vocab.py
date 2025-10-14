@@ -27,7 +27,6 @@ class Vocab:
             self.word2idx[" "] = len(self.word2idx)
 
         self.idx2word: Dict[int, str] = {v: k for k, v in self.word2idx.items()}
-        print("idx2word: ", self.idx2word)
 
 
     def words2indices(self, words: List[str]) -> List[int]:
