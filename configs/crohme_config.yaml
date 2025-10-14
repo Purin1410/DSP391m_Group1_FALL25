@@ -1,0 +1,101 @@
+seed_everything: 7
+
+trainer:
+  accelerator: gpu           
+  devices: [0, 1]             
+  strategy: ddp     
+  precision: 32
+  deterministic: true
+  max_epochs: 300
+  check_val_every_n_epoch: 150
+  val_check_interval: 1.0
+  gradient_clip_val: 3.0
+  gradient_clip_algorithm: norm
+  log_every_n_steps: 50
+  num_sanity_val_steps: 2
+  accumulate_grad_batches: 1
+  resume_from_checkpoint: null
+
+  early_stopping: false
+  # early_stopping:
+  #   monitor: val_loss
+  #   mode: min
+  #   patience: 15
+  #   min_delta: 0.0
+
+  checkpoint:
+    dirpath: "checkpoints/best"
+    filename: "{epoch}-{val_ExpRate:.4f}"
+    monitor: val_ExpRate
+    mode: max
+    save_top_k: 1
+    save_last: true
+
+  log_grad_norm: true
+  log_lr: true
+  lr_logging_interval: epoch
+
+model:
+  # ----- Encoder -----
+  input_channels: 1
+  dim_ConvBlock: [32, 64, 64, 128]
+  layersNum_block: [4, 4, 4, 4]
+  kernel_Convenc: [3, 1]
+  use_dropout: true
+  encoder_dropout_p: 0.2
+  block_dropout_indices: [2, 3]
+
+  # ----- Decoder -----
+  dim_target: 62        # vocab size
+  dim_word: 256
+  dim_dec: 512
+  dim_attention: 512
+  use_coverage: true
+  dim_coverage: 512
+  kernel_coverage: [5, 5]
+  maxout_groups: 2
+
+  # ----- Beam search -----
+  beam_size: 10
+  max_len: 200
+  alpha: 0.0
+  early_stopping: true
+  temperature: 1.0
+
+  # ----- Optimizer / Training -----
+  learning_rate: 0.0002  
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  use_focal_loss: false
+  focal_alpha: 1.0
+  focal_gamma: 2.0
+
+  patience: 15
+
+data:
+  zipfile_path: data.zip
+  test_year: '2014'
+  dictionary_txt: data/crohme_dictionary.txt
+  caption_txt: data/crohme_caption.txt
+  train_batch_size: 8
+  eval_batch_size: 4
+  num_workers: 4
+  scale_aug: false
+
+  # Augmentation params
+  k_min: 0.7
+  k_max: 1.4
+  h_lo: 16
+  h_hi: 256
+  w_lo: 16
+  w_hi: 1024
+
+  # Memory control
+  gpu_max_memory: 320000  
+  pin_memory: true
+  persistent_workers: true
+  free_memory: false
+
+wandb:
+  name: "WAP"
+  project: "DSP391m_Group1_FALL25"
