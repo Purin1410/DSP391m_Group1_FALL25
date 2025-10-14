@@ -2,7 +2,7 @@ seed_everything: 7
 
 trainer:
   accelerator: gpu           
-  devices: [0, 1]             
+  devices: 0            
   strategy: ddp     
   precision: 32
   deterministic: true

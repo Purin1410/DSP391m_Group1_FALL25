@@ -159,7 +159,6 @@ def train(cfg: Config):
     trainer = pl.Trainer(
         accelerator=cfg.trainer.get("accelerator", "gpu"),
         devices=cfg.trainer.get("devices", 1),
-        strategy=cfg.trainer.get("strategy", None),
         precision=cfg.trainer.get("precision", 32),
         max_epochs=cfg.trainer.get("max_epochs", 100),
         gradient_clip_val=cfg.trainer.get("gradient_clip_val", 0.0),
