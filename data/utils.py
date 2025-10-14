@@ -203,11 +203,11 @@ def build_validation_dataset(archive,
                              free_memory = False,
                              ):
     if folder != 'all':
-        data = extract_data(archive = archive, dir_name=folder, free_memory = free_memory)
+        data = extract_data(root_dir = archive, split=folder, free_memory = free_memory)
     else:
         data = []
         for folder in ['2014', '2016', '2019']:
-            data += extract_data(archive = archive, dir_name=folder, free_memory = free_memory)
+            data += extract_data(root_dir = archive, split=folder, free_memory = free_memory)
     return data_iterator(data = data, 
                          batch_size = batch_size,
                          batch_Imagesize = batch_Imagesize,
@@ -223,7 +223,7 @@ def build_train_dataset(archive,
                         maxImagesize,
                         free_memory: bool = False):
     if folder == 'train':
-        data = extract_data(archive = archive, dir_name=folder, free_memory = free_memory)
+        data = extract_data(root_dir = archive, split=folder, free_memory = free_memory)
         data = data_iterator(data = data, 
                         batch_size = batch_size,
                         batch_Imagesize = batch_Imagesize,
