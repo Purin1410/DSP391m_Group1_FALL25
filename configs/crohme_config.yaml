@@ -73,9 +73,9 @@ model:
   patience: 15
 
 data:
-  zipfile_path: data.zip
+  zipfile_path: crohme_data.zip
   test_year: '2014'
-  dictionary_txt: data/crohme_dictionary.txt
+  dictionary_txt: data/dictionary.txt
   caption_txt: data/crohme_caption.txt
   train_batch_size: 8
   eval_batch_size: 4
