@@ -66,65 +66,65 @@ class CROHMEDatamodule(pl.LightningDataModule):
         
 
     def setup(self, stage: Optional[str] = None) -> None:
-        with ZipFile(self.zipfile_path) as archive:
-            if stage == "fit" or stage is None:
-                # Train_dataset
-                self.train_dataset = CROHMEDataset(
-                    dataset = build_train_dataset(archive       = archive, 
-                                                folder          = 'train', 
-                                                batch_size      = self.train_batch_size,
-                                                batch_Imagesize = self.gpu_max_memory,
-                                                maxlen          = self.maxlen, 
-                                                maxImagesize    = self.gpu_max_memory,
-                                                free_memory     = self.free_memory,
-                                                ),
-                    is_train    = True,
-                    scale_aug   = self.scale_aug,
-                    k_min       = self.config.data.k_min,
-                    k_max       = self.config.data.k_max,
-                    w_lo        = self.config.data.w_lo,
-                    w_hi        = self.config.data.w_hi,
-                    h_lo        = self.config.data.h_lo,
-                    h_hi        = self.config.data.h_hi,
-                )
-                # Val_dataset
-                self.val_dataset = CROHMEDataset(
-                    dataset = build_validation_dataset(archive  = archive, 
-                                                folder          = self.test_year, 
-                                                batch_size      = self.eval_batch_size,
-                                                batch_Imagesize = self.gpu_max_memory,
-                                                maxlen          = self.maxlen, 
-                                                maxImagesize    = self.gpu_max_memory,
-                                                free_memory     = self.free_memory,
-                                                ),
-                    is_train    = False,
-                    scale_aug   = self.scale_aug,
-                    k_min       = self.config.data.k_min,
-                    k_max       = self.config.data.k_max,
-                    w_lo        = self.config.data.w_lo,
-                    w_hi        = self.config.data.w_hi,
-                    h_lo        = self.config.data.h_lo,
-                    h_hi        = self.config.data.h_hi,
-                )
-            if stage == "test" or stage is None:
-                self.test_dataset = CROHMEDataset(
-                    dataset = build_validation_dataset(archive  = archive, 
-                                                folder          = self.test_year, 
-                                                batch_size      = self.eval_batch_size,
-                                                batch_Imagesize = self.gpu_max_memory,
-                                                maxlen          = self.maxlen, 
-                                                maxImagesize    = self.gpu_max_memory,
-                                                free_memory     = self.free_memory,
-                                             ),
-                    is_train    = False,
-                    scale_aug   = self.scale_aug,
-                    k_min       = self.config.data.k_min,
-                    k_max       = self.config.data.k_max,
-                    w_lo        = self.config.data.w_lo,
-                    w_hi        = self.config.data.w_hi,
-                    h_lo        = self.config.data.h_lo,
-                    h_hi        = self.config.data.h_hi,
-                )
+        # with ZipFile(self.zipfile_path) as archive:
+        if stage == "fit" or stage is None:
+            # Train_dataset
+            self.train_dataset = CROHMEDataset(
+                dataset = build_train_dataset(archive       = self.zipfile_path, 
+                                            folder          = 'train', 
+                                            batch_size      = self.train_batch_size,
+                                            batch_Imagesize = self.gpu_max_memory,
+                                            maxlen          = self.maxlen, 
+                                            maxImagesize    = self.gpu_max_memory,
+                                            free_memory     = self.free_memory,
+                                            ),
+                is_train    = True,
+                scale_aug   = self.scale_aug,
+                k_min       = self.config.data.k_min,
+                k_max       = self.config.data.k_max,
+                w_lo        = self.config.data.w_lo,
+                w_hi        = self.config.data.w_hi,
+                h_lo        = self.config.data.h_lo,
+                h_hi        = self.config.data.h_hi,
+            )
+            # Val_dataset
+            self.val_dataset = CROHMEDataset(
+                dataset = build_validation_dataset(archive  = self.zipfile_path, 
+                                            folder          = self.test_year, 
+                                            batch_size      = self.eval_batch_size,
+                                            batch_Imagesize = self.gpu_max_memory,
+                                            maxlen          = self.maxlen, 
+                                            maxImagesize    = self.gpu_max_memory,
+                                            free_memory     = self.free_memory,
+                                            ),
+                is_train    = False,
+                scale_aug   = self.scale_aug,
+                k_min       = self.config.data.k_min,
+                k_max       = self.config.data.k_max,
+                w_lo        = self.config.data.w_lo,
+                w_hi        = self.config.data.w_hi,
+                h_lo        = self.config.data.h_lo,
+                h_hi        = self.config.data.h_hi,
+            )
+        if stage == "test" or stage is None:
+            self.test_dataset = CROHMEDataset(
+                dataset = build_validation_dataset(archive  = self.zipfile_path, 
+                                            folder          = self.test_year, 
+                                            batch_size      = self.eval_batch_size,
+                                            batch_Imagesize = self.gpu_max_memory,
+                                            maxlen          = self.maxlen, 
+                                            maxImagesize    = self.gpu_max_memory,
+                                            free_memory     = self.free_memory,
+                                            ),
+                is_train    = False,
+                scale_aug   = self.scale_aug,
+                k_min       = self.config.data.k_min,
+                k_max       = self.config.data.k_max,
+                w_lo        = self.config.data.w_lo,
+                w_hi        = self.config.data.w_hi,
+                h_lo        = self.config.data.h_lo,
+                h_hi        = self.config.data.h_hi,
+            )
 
     def train_dataloader(self):
         return DataLoader(
