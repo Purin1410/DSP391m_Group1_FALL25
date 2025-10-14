@@ -14,7 +14,7 @@ from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
 from sconf import Config
 
 from data.datamodule import CROHMEDatamodule
-from models.lit_model import LitWAP
+from lit_model import LitWAP
 
 
 # -------- optional: log gradient norm ----------
