@@ -40,7 +40,7 @@ model:
   input_channels: 1
   dim_ConvBlock: [32, 64, 64, 128]
   layersNum_block: [4, 4, 4, 4]
-  kernel_Convenc: [3, 1]
+  kernel_Convenc: [3, 3]
   use_dropout: true
   encoder_dropout_p: 0.2
   block_dropout_indices: [2, 3]
@@ -48,10 +48,10 @@ model:
   # ----- Decoder -----
   dim_target: 114        # vocab size
   dim_word: 256
-  dim_dec: 512
-  dim_attention: 512
+  dim_dec: 256
+  dim_attention: 128
   use_coverage: true
-  dim_coverage: 512
+  dim_coverage: 128
   kernel_coverage: [5, 5]
   maxout_groups: 2
 
@@ -63,8 +63,8 @@ model:
   temperature: 1.0
 
   # ----- Optimizer / Training -----
-  learning_rate: 0.0002  
-  weight_decay: 0.0
+  learning_rate: 2e-4
+  weight_decay: 1e-4
   betas: [0.9, 0.999]
   use_focal_loss: false
   focal_alpha: 1.0
