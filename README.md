@@ -3,7 +3,8 @@
 # 🧮 Handwritten Mathematical Expression Recognition (HMER)  
 ### Data Science Project — FPT University | DSP391-FA25-AI1802
 
-### NOTE: LOOK AT THE DIFFERENCE BRANCH TO SEE THE DIFFERENCE CODE MODEL
+
+### <b><span style="color:red">NOTE: LOOK AT THE DIFFERENCE BRANCH TO SEE THE DIFFERENCE CODE MODEL</span></b>
 
 ---
 
@@ -123,7 +124,8 @@ This project is for **academic research only**, in compliance with DSP391m ethic
 
 ## 🇻🇳 Phiên bản tiếng Việt
 
-### GHI CHÚ: MỖI 1 MODEL ĐƯỢC ĐỂ TRONG TỪNG BRANCH KHÁC NHAU, XIN HÃY CHUYỂN BRANCH ĐỂ XEM TỪNG REPO RÕ HƠN
+### <b><span style="color:red">GHI CHÚ: MỖI 1 MODEL ĐƯỢC ĐỂ TRONG TỪNG BRANCH KHÁC NHAU, XIN HÃY CHUYỂN BRANCH ĐỂ XEM TỪNG REPO RÕ HƠN</span></b>
+
 
 ### 📘 Tổng quan
 Dự án này xây dựng **hệ thống nhận dạng biểu thức toán học viết tay (HMER)** từ hình ảnh và chuyển đổi sang **mã LaTeX hợp lệ**.  
