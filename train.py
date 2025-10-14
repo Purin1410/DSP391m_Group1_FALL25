@@ -14,7 +14,6 @@ from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
 from sconf import Config
 
 from data.datamodule import CROHMEDatamodule
-from lit_model import LitWAP
 
 
 # -------- optional: log gradient norm ----------
@@ -117,28 +116,6 @@ def build_callbacks(cfg: Config) -> List[Callback]:
     return cbs
 
 
-def build_model(cfg: Config) -> LitWAP:
-    lit = LitWAP(
-        config=cfg,
-        # optimizer
-        learning_rate=cfg.model.get("learning_rate", 3e-4),
-        weight_decay=cfg.model.get("weight_decay", 0.0),
-        betas=tuple(cfg.model.get("betas", [0.9, 0.999])),
-        # loss
-        use_focal_loss=cfg.model.get("use_focal_loss", False),
-        focal_alpha=cfg.model.get("focal_alpha", 1.0),
-        focal_gamma=cfg.model.get("focal_gamma", 2.0),
-        # beam
-        beam_size=cfg.model.get("beam_size", 5),
-        max_len=cfg.model.get("max_len", 200),
-        alpha=cfg.model.get("alpha", 0.0),
-        early_stopping=cfg.model.get("early_stopping", True),
-        temperature=cfg.model.get("temperature", 1.0),
-        # logging
-        log_train_loss_every_step=cfg.trainer.get("log_train_loss_every_step", False),
-    )
-    return lit
-
 
 def train(cfg: Config):
     # 1) seed
@@ -146,7 +123,31 @@ def train(cfg: Config):
 
     dm = CROHMEDatamodule(cfg)
     dm.setup(stage="fit")
+    # Init model
+    from lit_model import LitWAP
+    def build_model(cfg: Config) -> LitWAP:
+        lit = LitWAP(
+            config=cfg,
+            # optimizer
+            learning_rate=cfg.model.get("learning_rate", 3e-4),
+            weight_decay=cfg.model.get("weight_decay", 0.0),
+            betas=tuple(cfg.model.get("betas", [0.9, 0.999])),
+            # loss
+            use_focal_loss=cfg.model.get("use_focal_loss", False),
+            focal_alpha=cfg.model.get("focal_alpha", 1.0),
+            focal_gamma=cfg.model.get("focal_gamma", 2.0),
+            # beam
+            beam_size=cfg.model.get("beam_size", 5),
+            max_len=cfg.model.get("max_len", 200),
+            alpha=cfg.model.get("alpha", 0.0),
+            early_stopping=cfg.model.get("early_stopping", True),
+            temperature=cfg.model.get("temperature", 1.0),
+            # logging
+            log_train_loss_every_step=cfg.trainer.get("log_train_loss_every_step", False),
+        )
+        return lit
 
+    # 2) Build model
     if cfg.trainer.get("resume_from_checkpoint"):
         print(f"[Trainer] Resuming from checkpoint: {cfg.trainer.resume_from_checkpoint}")
         lit = LitWAP.load_from_checkpoint(cfg.trainer.resume_from_checkpoint, config=cfg)
