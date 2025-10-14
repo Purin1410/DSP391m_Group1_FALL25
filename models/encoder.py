@@ -12,7 +12,7 @@ class ConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel: Tuple[int, int], dropout: float = 0.0):
         super().__init__()
         padding = tuple(k // 2 for k in kernel)  # "same" padding
-        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=kernel, padding=padding, bias=False)
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=kernel, padding=padding, bias=True)
         # self.bn = nn.BatchNorm2d(out_ch)
         self.dropout_p = dropout
         self.dropout = nn.Dropout2d(p=dropout) if dropout > 0 else nn.Identity()
