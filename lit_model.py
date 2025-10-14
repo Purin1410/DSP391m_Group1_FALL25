@@ -155,12 +155,14 @@ class LitWAP(pl.LightningModule):
     @torch.no_grad()
     def approximate_joint_search(self, img: FloatTensor, mask: LongTensor) -> List[Hypothesis]:
         device = img.device
+        B = img.size(0)
 
         adapter = _WAPDecodeAdapter(self.model, vocab_size=self.vocab_size).to(device)
         adapter.prepare(img, mask)
 
-        feats = [torch.empty(0, device=device)]
-        masks = [torch.empty(0, device=device)]
+        # placeholder có batch size B
+        feats = [torch.zeros(B, 1, device=device)]
+        masks = [torch.ones(B, 1, dtype=torch.long, device=device)]
 
         return adapter.beam_search(
             src=feats,

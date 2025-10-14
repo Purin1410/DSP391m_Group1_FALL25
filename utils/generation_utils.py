@@ -69,7 +69,7 @@ class DecodeModel(pl.LightningModule):
         List[Hypothesis]: [batch_size,]
         """
         device = self.device
-        batch_size = src[0].shape[0] if len(src) > 0 else 1
+        batch_size = src[0].shape[0] 
 
         # Khởi tạo <sos>
         input_ids = torch.full(
