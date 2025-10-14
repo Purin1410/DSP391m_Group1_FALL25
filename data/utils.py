@@ -6,6 +6,9 @@ import torch
 from PIL import Image
 from torch import FloatTensor, LongTensor
 
+from data.datamodule import CROHMEDatamodule
+vocab = CROHMEDatamodule.shared_vocab
+
 Data = List[Tuple[str, Image.Image, List[str]]]
 
 
@@ -116,7 +119,7 @@ class Batch:
             indices=self.indices,
         )
 
-def collate_fn(batch, vocab):
+def collate_fn(batch):
     assert len(batch) == 1
     batch = batch[0]
     fnames = batch[0]

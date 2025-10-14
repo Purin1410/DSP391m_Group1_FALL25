@@ -106,7 +106,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             dataset             = self.train_dataset,
             shuffle             = True,
             num_workers         = self.num_workers,
-            collate_fn          = collate_fn(vocab = self.vocab),
+            collate_fn          = collate_fn,
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
         )
@@ -116,7 +116,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             dataset             = self.val_dataset,
             shuffle             = False,
             num_workers         = self.num_workers,
-            collate_fn          = collate_fn(vocab = self.vocab),
+            collate_fn          = collate_fn,
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
         )
@@ -126,7 +126,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             dataset             = self.test_dataset,
             shuffle             = False,
             num_workers         = self.num_workers,
-            collate_fn          = collate_fn(vocab = self.vocab),
+            collate_fn          = collate_fn,
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
         )
