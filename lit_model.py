@@ -57,6 +57,12 @@ class LitWAP(pl.LightningModule):
         use_focal_loss: bool = False,
         focal_alpha: float = 1.0,
         focal_gamma: float = 2.0,
+        momentum: float = 0.9,
+        scheduler: Dict[str, Any] = {
+            "factor": 0.25,
+            "patience": 12,
+            "mode": "max",
+        },
         # beam search
         beam_size: int = 5,
         max_len: int = 200,
@@ -185,14 +191,14 @@ class LitWAP(pl.LightningModule):
         self.optimizer = optim.SGD(
             self.parameters(),
             lr=self.hparams.learning_rate,
-            momentum=self.config.model.momentum,
-            weight_decay=self.config.model.weight_decay,
+            momentum=self.hparams.momentum,
+            weight_decay=self.hparams.weight_decay,
         )
         self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode=self.hparams.scheduler.mode,
             factor=self.hparams.scheduler.factor,
-            patience=self.config.model.scheduler.patience // self.trainer.check_val_every_n_epoch,
+            patience=self.hparams.scheduler.patience // self.trainer.check_val_every_n_epoch,
         )
 
         return {"optimizer": self.optimizer, "lr_scheduler": self.lr_scheduler}

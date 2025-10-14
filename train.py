@@ -132,6 +132,12 @@ def train(cfg: Config):
             use_focal_loss=cfg.model.get("use_focal_loss", False),
             focal_alpha=cfg.model.get("focal_alpha", 1.0),
             focal_gamma=cfg.model.get("focal_gamma", 2.0),
+            momentum=cfg.model.get("momentum", 0.9),
+            scheduler=cfg.model.get("scheduler", {
+                "factor": 0.25,
+                "patience": 12,
+                "mode": "max",
+            }),
             # beam
             beam_size=cfg.model.get("beam_size", 5),
             max_len=cfg.model.get("max_len", 200),
