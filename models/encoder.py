@@ -64,12 +64,14 @@ class VGGEncoder(nn.Module):
         self.out_channels = in_ch
 
     @staticmethod
-    def _downsample_mask(mask: torch.Tensor, n_pools: int) -> torch.Tensor:
-        # mask: [B, H, W] -> progressively 2x2 max-pool to track valid area
-        m = mask
+    def _downsample_mask(self, img_mask: torch.Tensor, n_pools: int):
+        m = img_mask
+        if m.dtype == torch.bool:
+            m = m.float()
+
         for _ in range(n_pools):
             m = F.max_pool2d(m.unsqueeze(1), kernel_size=2, stride=2, ceil_mode=True).squeeze(1)
-        return (m > 0.5).float()
+        return m
 
     def forward(self, img: torch.Tensor, img_mask: torch.Tensor):
         """
