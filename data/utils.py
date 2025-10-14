@@ -148,10 +148,11 @@ def extract_data(
 
     for line in captions:
         # parts = line.strip().split()
-        parts = line.rstrip("\n").split(" ")
+        raw = line.rstrip("\n")
+        parts = raw.split("\t", 1) if "\t" in raw else raw.split(" ", 1)
         if len(parts) == 0:
             continue
-        img_stem = parts[0]          # không nhất thiết đã có .ext
+        img_stem = parts[0]         
         tokens = parts[1:]
 
         stem_no_ext = Path(img_stem).stem
