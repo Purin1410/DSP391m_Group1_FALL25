@@ -7,7 +7,7 @@ import torch
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
 
-from .model import WAPModel
+from models.model import WAPModel
 from utils.utils import ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out
 
 
