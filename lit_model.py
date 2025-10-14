@@ -90,17 +90,17 @@ class LitWAP(pl.LightningModule):
         """
         img      : [B, C_in, H, W]
         img_mask : [B, H, W]
-        tgt      : [2B, L]  (đã là bi-tgt từ to_bi_tgt_out)
-        return   : [2B, L, V]
+        tgt      : [B, L]
+        return   : [B, L, V]
         """
         logits, _ = self.model(img, img_mask, tgt.transpose(0, 1), temperature=temperature)  # [L, 2B, V]
-        return logits.transpose(0, 1)  # [2B, L, V]
+        return logits.transpose(0, 1)  # [B, L, V]
 
     # ---------- Training ----------
     def training_step(self, batch, _):
-        tgt, out = to_bi_tgt_out(batch.indices, self.device)  # [2B,L],[2B,L]
+        tgt, out = to_bi_tgt_out(batch.indices, self.device)  # [B,L],[B,L]
 
-        out_hat = self(batch.imgs, batch.mask, tgt)  # [2B,L,V]
+        out_hat = self(batch.imgs, batch.mask, tgt)  # [B,L,V]
         if self._use_focal:
             loss = self._focal_fn(out_hat, out, alpha=self.hparams.focal_alpha, gamma=self.hparams.focal_gamma)
         else:
@@ -155,13 +155,8 @@ class LitWAP(pl.LightningModule):
     # ---------- Beam search wrapper ----------
     @torch.no_grad()
     def approximate_joint_search(self, img: FloatTensor, mask: LongTensor) -> List[Hypothesis]:
-        """
-        Dùng adapter + utils/generation_utils để chạy beam search 2 chiều (l2r & r2l) + rescoring.
-        Trả về List[Hypothesis] độ dài = batch_size (mỗi item có .seq là list token ids).
-        """
         device = img.device
 
-        # Chuẩn bị adapter
         adapter = _WAPDecodeAdapter(self.model, vocab_size=self.vocab_size).to(device)
         adapter.prepare(img, mask)
 

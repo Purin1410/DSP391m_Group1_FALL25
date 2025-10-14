@@ -213,10 +213,6 @@ def to_bi_tgt_out(
     Tuple[LongTensor, LongTensor]
         tgt, out: [2b, l], [2b, l]
     """
-    l2r_tgt, l2r_out = to_tgt_output(tokens, "l2r", device)
-    r2l_tgt, r2l_out = to_tgt_output(tokens, "r2l", device)
-
-    tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
-    out = torch.cat((l2r_out, r2l_out), dim=0)
+    tgt, out = to_tgt_output(tokens, "l2r", device)
 
     return tgt, out
