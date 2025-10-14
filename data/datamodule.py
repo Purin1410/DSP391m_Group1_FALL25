@@ -37,6 +37,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         if CROHMEDatamodule.shared_vocab is None:
             CROHMEDatamodule.shared_vocab = Vocab(dict_path=config.data.dictionary_txt)
         self.vocab = CROHMEDatamodule.shared_vocab
+        print(len(self.vocab))
         
         print(f"Load data from: {self.zipfile_path}")
     
