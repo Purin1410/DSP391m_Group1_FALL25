@@ -2,7 +2,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from .datamodule import CROHMEDatamodule
+from data.datamodule import CROHMEDatamodule
 vocab = CROHMEDatamodule.vocab
 
 from einops import rearrange
