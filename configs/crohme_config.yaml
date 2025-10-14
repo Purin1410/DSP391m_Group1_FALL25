@@ -24,7 +24,7 @@ trainer:
   #   min_delta: 0.0
 
   checkpoint:
-    dirpath: "checkpoints/best"
+    dirpath: checkpoints
     filename: "{epoch}-{val_ExpRate:.4f}"
     monitor: val_ExpRate
     mode: max
