@@ -2,7 +2,7 @@ seed_everything: 7
 
 trainer:
   accelerator: gpu           
-  devices: 1            
+  devices: 0,1            
   strategy: ddp     
   precision: 32
   deterministic: true
@@ -77,8 +77,8 @@ data:
   test_year: '2014'
   dictionary_txt: data/dictionary.txt
   caption_txt: data/crohme_caption.txt
-  train_batch_size: 8
-  eval_batch_size: 8
+  train_batch_size: 256
+  eval_batch_size: 256
   num_workers: 4
   scale_aug: false
 
