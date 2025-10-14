@@ -64,8 +64,9 @@ class VGGEncoder(nn.Module):
         self.out_channels = in_ch
 
     @staticmethod
-    def _downsample_mask(self, img_mask: torch.Tensor, n_pools: int):
+    def _downsample_mask(img_mask: torch.Tensor, n_pools: int):
         m = img_mask
+        # ⚠️ Convert bool → float
         if m.dtype == torch.bool:
             m = m.float()
 
