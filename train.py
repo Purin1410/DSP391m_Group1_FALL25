@@ -154,6 +154,8 @@ def train(cfg: Config):
     # 4) Logger & Callbacks
     logger = build_logger(cfg)
     callbacks = build_callbacks(cfg)
+    ckpt_path = cfg.trainer.get("resume_from_checkpoint", None)
+
 
     # 5) Trainer
     trainer = pl.Trainer(
@@ -170,11 +172,11 @@ def train(cfg: Config):
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=cfg.trainer.get("log_every_n_steps", 50),
+        resume_from_checkpoint=ckpt_path,
     )
 
     # 6) Fit
-    ckpt_path = cfg.trainer.get("resume_from_checkpoint", None)
-    trainer.fit(lit, datamodule=dm, ckpt_path=ckpt_path)
+    trainer.fit(lit, datamodule=dm)
 
     # 7) (Optional) Test
     if cfg.trainer.get("run_test_after_fit", False):
