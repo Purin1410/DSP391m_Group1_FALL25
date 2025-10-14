@@ -30,7 +30,7 @@ class CoverageAttention(nn.Module):
         super().__init__()
         self.ctx_proj = nn.Conv2d(ctx_channels, attn_dim, kernel_size=1, bias=True)
         self.state_proj = nn.Linear(state_dim, attn_dim, bias=False)
-        self.v = nn.Linear(attn_dim, 1, bias=True)
+        self.v = nn.Conv2d(attn_dim, 1, kernel_size=1, bias=True)
 
         self.use_coverage = use_coverage
         if use_coverage:
@@ -41,7 +41,7 @@ class CoverageAttention(nn.Module):
                 padding=tuple(k // 2 for k in kernel_coverage),
                 bias=True,
             )
-            self.coverage_proj = nn.Linear(coverage_dim, attn_dim, bias=False)
+            self.coverage_proj = nn.Conv2d(coverage_dim, attn_dim, kernel_size=1, bias=False)
 
         self.reset_parameters()
 
@@ -49,6 +49,7 @@ class CoverageAttention(nn.Module):
         nn.init.xavier_uniform_(self.ctx_proj.weight)
         nn.init.zeros_(self.ctx_proj.bias)
         nn.init.xavier_uniform_(self.state_proj.weight)
+        # v giờ là Conv2d
         nn.init.xavier_uniform_(self.v.weight)
         nn.init.zeros_(self.v.bias)
         if self.use_coverage:
@@ -64,33 +65,27 @@ class CoverageAttention(nn.Module):
         alpha_past: Optional[torch.Tensor] = None,  # [B, 1, H, W]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, C, H, W = context_2d.shape
+        
 
         # Precompute projections
-        ctx_proj = self.ctx_proj(context_2d)                # [B, attn, H, W]
-        s_proj = self.state_proj(state).unsqueeze(-1).unsqueeze(-1)  # [B, attn, 1, 1]
-
-        e = ctx_proj + s_proj                                # [B, attn, H, W]
+        ctx_proj = self.ctx_proj(context_2d)                      # [B, attn, H, W]
+        s_proj  = self.state_proj(state).unsqueeze(-1).unsqueeze(-1)  # [B, attn,1,1]
+        e = torch.tanh(ctx_proj + s_proj)                         # [B, attn, H, W]
 
         if self.use_coverage:
             if alpha_past is None:
                 alpha_past = context_2d.new_zeros(B, 1, H, W)
-            cov_feat = F.relu(self.coverage_conv(alpha_past))             # [B, cov, H, W]
-            cov_proj = self.coverage_proj(cov_feat.permute(0, 2, 3, 1))   # [B, H, W, attn]
-            cov_proj = cov_proj.permute(0, 3, 1, 2)                       # [B, attn, H, W]
-            e = e + cov_proj
+            cov_feat = F.relu(self.coverage_conv(alpha_past))     # [B, cov, H, W]
+            cov_proj = self.coverage_proj(cov_feat)               # [B, attn, H, W]
+            e = torch.tanh(e + cov_proj)
 
-        e = torch.tanh(e)                                 # [B, attn, H, W]
-        scores = self.v(e).squeeze(1)                     # [B, H, W]
+        scores = self.v(e).squeeze(1)                             # [B, H, W] 
 
         if mask_2d is not None:
             scores = scores.masked_fill(mask_2d == 0, -1e9)
 
-        alpha = torch.softmax(scores.view(B, -1), dim=-1).view(B, H, W)   # [B,H,W]
-        alpha_exp = alpha.unsqueeze(1)                                     # [B,1,H,W]
-        # context vector: weighted sum over spatial dims -> [B, C]
-        ctx_vec = torch.sum(context_2d * alpha_exp, dim=(2, 3))            # [B,C]
-
-        # update coverage
+        alpha = torch.softmax(scores.view(B, -1), dim=-1).view(B, H, W)
+        alpha_exp = alpha.unsqueeze(1)                            # [B,1,H,W]
+        ctx_vec = torch.sum(context_2d * alpha_exp, dim=(2, 3))   # [B, C]
         alpha_past_next = alpha_exp if alpha_past is None else (alpha_past + alpha_exp)
-
         return ctx_vec, alpha, alpha_past_next
