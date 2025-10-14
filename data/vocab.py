@@ -15,7 +15,7 @@ class Vocab:
 
         with open(dict_path, "r") as f:
             for line in f.readlines():
-                w = line.strip()
+                w = line.rstrip("\n")
                 self.word2idx[w] = len(self.word2idx)
 
         self.idx2word: Dict[int, str] = {v: k for k, v in self.word2idx.items()}

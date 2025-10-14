@@ -147,9 +147,7 @@ def extract_data(
     missing = 0
 
     for line in captions:
-        # parts = line.strip().split()
-        raw = line.rstrip("\n")
-        parts = raw.split("\t", 1) if "\t" in raw else raw.split(" ", 1)
+        parts = line.strip().split()
         if len(parts) == 0:
             continue
         img_stem = parts[0]         
