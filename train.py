@@ -36,18 +36,18 @@ class GradNormCallback(Callback):
 
 def build_logger(cfg: Config):
     backend = 'wandb'
-    name = cfg.logging.get("name", "WAP")
-    save_dir = cfg.logging.get("save_dir", "logs")
+    name = cfg.wandb.get("name", "WAP")
+    save_dir = cfg.wandb.get("save_dir", "logs")
 
     if backend == "wandb":
         try:
             from pytorch_lightning.loggers import WandbLogger
             return WandbLogger(
-                project=cfg.logging.get("project", "DSP391m_Group1_FALL25"),
+                project=cfg.wandb.get("project", "DSP391m_Group1_FALL25"),
                 name=name,
                 save_dir=save_dir,
                 config=dict(cfg),
-                log_model=cfg.logging.get("log_model", False),
+                log_model=cfg.wandb.get("log_model", False),
             )
         except Exception as e:
             print(f"[logger] Wandb not available ({e}), fallback to TensorBoard.")
