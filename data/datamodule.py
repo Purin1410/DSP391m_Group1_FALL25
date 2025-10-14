@@ -4,10 +4,33 @@ import pytorch_lightning as pl
 from .dataset import CROHMEDataset
 from torch.utils.data.dataloader import DataLoader
 from .utils import (build_train_dataset, 
-                    build_validation_dataset, 
-                    collate_fn)
+                    build_validation_dataset)
 from .vocab import Vocab
+from .utils import Batch
+import torch
 
+def collate_fn(batch):
+    assert len(batch) == 1
+    batch = batch[0]
+    fnames = batch[0]
+    images_x = batch[1]
+    seqs_y = [CROHMEDatamodule.shared_vocab.words2indices(x) for x in batch[2]]
+
+    heights_x = [s.size(1) for s in images_x]
+    widths_x = [s.size(2) for s in images_x]
+
+    n_samples = len(heights_x)
+    max_height_x = max(heights_x)
+    max_width_x = max(widths_x)
+
+    x = torch.zeros(n_samples, 1, max_height_x, max_width_x)
+    x_mask = torch.ones(n_samples, max_height_x, max_width_x, dtype=torch.bool)
+    for idx, s_x in enumerate(images_x):
+        x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
+        x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
+
+    # return fnames, x, x_mask, seqs_y
+    return Batch(fnames, x, x_mask, seqs_y)
 class CROHMEDatamodule(pl.LightningDataModule):
     shared_vocab: Optional[Vocab] = None  # class-level cache
     def __init__(
