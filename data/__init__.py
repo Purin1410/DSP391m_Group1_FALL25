@@ -1,8 +1,7 @@
-from .datamodule import Batch, CROHMEDatamodule
+from .datamodule import CROHMEDatamodule
 from .vocab import Vocab
 
 __all__ = [
     "CROHMEDatamodule",
     "Vocab",
-    "Batch",
 ]
