@@ -1,7 +1,7 @@
 seed_everything: 7
 
 trainer:
-  accelerator: gpu           
+  accelerator: ddp #gpu           
   devices: 0,1            
   strategy: ddp     
   precision: 32
