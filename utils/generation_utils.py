@@ -68,34 +68,26 @@ class DecodeModel(pl.LightningModule):
         -------
         List[Hypothesis]: [batch_size,]
         """
-        batch_size = src[0].shape[0] * 2  # mul 2 for bi-direction
-        batch_beam_size = batch_size * beam_size
-        half_bb_size = batch_beam_size // 2
+        device = self.device
+        batch_size = src[0].shape[0] if len(src) > 0 else 1
 
-        for i in range(len(src)):
-            # [2 * b, t, d], [l2r l2r, r2l r2l]
-            src[i] = torch.cat((src[i], src[i]), dim=0)
-            src_mask[i] = torch.cat((src_mask[i], src_mask[i]), dim=0)
-
-        l2r = torch.full(
-            (batch_size // 2, 1),
+        # Khởi tạo <sos>
+        input_ids = torch.full(
+            (batch_size, 1),
             fill_value=vocab.SOS_IDX,
             dtype=torch.long,
-            device=self.device,
+            device=device,
         )
-        r2l = torch.full(
-            (batch_size // 2, 1),
-            fill_value=vocab.EOS_IDX,
-            dtype=torch.long,
-            device=self.device,
-        )
-        input_ids = torch.cat((l2r, r2l), dim=0)
 
         beam_scorer = BeamSearchScorer(
-            batch_size, beam_size, alpha, early_stopping, self.device
+            batch_size=batch_size,
+            beam_size=beam_size,
+            alpha=alpha,
+            do_early_stopping=early_stopping,
+            device=device,
         )
 
-        # first beam search
+        # Chạy beam
         hyps, scores = self._beam_search(
             src=src,
             src_mask=src_mask,
@@ -106,47 +98,14 @@ class DecodeModel(pl.LightningModule):
             temperature=temperature,
         )
 
-        # reverse half last
-        for i in range(half_bb_size, batch_beam_size):
-            hyps[i] = torch.flip(hyps[i], dims=[0])
+        scores = rearrange(scores, "(b m) -> b m", b=batch_size)  # [b, beam]
+        best_scores, best_beam = torch.max(scores, dim=1)
 
-        lens = [len(h) + 1 for h in hyps]  # plus to append start token
-        r2l_tgt, r2l_out = to_tgt_output(
-            hyps[:half_bb_size], "r2l", self.device, pad_to_len=max(lens)
-        )
-        l2r_tgt, l2r_out = to_tgt_output(
-            hyps[half_bb_size:], "l2r", self.device, pad_to_len=max(lens)
-        )
-        tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
-        out = torch.cat((l2r_out, r2l_out), dim=0)
-
-        # calculate final score
-        rev_scores = self._rate(src, src_mask, tgt, out, alpha, temperature)
-        rev_scores = torch.cat(
-            (rev_scores[half_bb_size:], rev_scores[:half_bb_size]), dim=0
-        )
-        scores = scores + rev_scores
-
-        # [2 * b, beam_size]
-        scores = rearrange(scores, "(b m) -> b m", b=batch_size)
-        l2r_scores, r2l_scores = torch.chunk(scores, 2, dim=0)
-        # [b, 2 * beam_size]
-        scores = torch.cat((l2r_scores, r2l_scores), dim=1)
-        # [batch_size, ]
-        best_scores, best_indices = torch.max(scores, dim=1)
-        best_split = best_indices // beam_size
-        best_indices = best_indices % beam_size
-        batch_indices = torch.arange(
-            0, batch_size // 2, dtype=torch.long, device=self.device
-        )
-        best_indices = (
-            best_split * half_bb_size + batch_indices * beam_size + best_indices
-        )
-
-        ret: List[Hypothesis] = []
-        for idx, score in zip(best_indices, best_scores):
-            hpy = Hypothesis(hyps[idx], score, "l2r")
-            ret.append(hpy)
+        ret = []
+        for b in range(batch_size):
+            flat_idx = b * beam_size + best_beam[b].item()
+            seq = hyps[flat_idx]
+            ret.append(Hypothesis(seq, best_scores[b].item(), "l2r"))
         return ret
 
     def _beam_search(
