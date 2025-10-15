@@ -95,7 +95,7 @@ data:
   w_hi: 1024
 
   # Memory control
-  gpu_max_memory: 320000  
+  gpu_max_memory: 1280000  
   pin_memory: true
   persistent_workers: true
   free_memory: false
