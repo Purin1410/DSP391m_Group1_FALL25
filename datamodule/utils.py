@@ -51,9 +51,11 @@ def data_iterator(
         batch_image_size = biggest_image_size * (i + 1)
 
         if len(lab) > maxlen:
-            print("sentence", i, "length bigger than", maxlen, "ignore")
+            pass
+            # print("sentence", i, "length bigger than", maxlen, "ignore")
         elif size > maxImagesize:
-            print(f"image: {fname} size: {w} x {h} =  bigger than {maxImagesize}, ignore")
+            pass
+            # print(f"image: {fname} size: {w} x {h} =  bigger than {maxImagesize}, ignore")
         else:
             if batch_image_size > batch_Imagesize or i == batch_size:
                 fname_total.append(fname_batch)
