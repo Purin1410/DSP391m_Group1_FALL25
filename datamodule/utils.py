@@ -148,7 +148,7 @@ def extract_data(
         if lazy_load:
             with Image.open(img_path) as im:
                 size = im.size
-            data.append((img_path.stem, size, tokens))
+            data.append((str(img_path), size, tokens))
         else:
             with Image.open(img_path) as im:
                 if convert_mode is not None:

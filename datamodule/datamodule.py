@@ -46,6 +46,8 @@ class CROHMEDatamodule(pl.LightningDataModule):
         fnames = batch[0]
         images_x = batch[1]
         seqs_y = [self.vocab.words2indices(x) for x in batch[2]]
+        
+        images_x = [torch.as_tensor(s, dtype=torch.float32).unsqueeze(0) if not torch.is_tensor(s) else s for s in images_x]
 
         heights_x = [s.size(1) for s in images_x]
         widths_x = [s.size(2) for s in images_x]

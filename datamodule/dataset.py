@@ -42,14 +42,15 @@ class CROHMEDataset(Dataset):
         if self.lazy_load:
             for item in imgs:
                 if isinstance(item, tuple):
+                    print(f"[WARN] Skipping unresolved image tuple {item}")
                     continue
                 try:
                     im = Image.open(item).convert("L")
                     im_np = np.array(im)
+                    processed_imgs.append(self.transform(im_np))
                 except Exception as e:
                     print(f"[WARN] Could not open image {item}: {e}")
                     continue
-                processed_imgs.append(self.transform(im_np))
         else:
             for im in imgs:
                 if not isinstance(im, np.ndarray):
