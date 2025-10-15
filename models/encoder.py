@@ -57,6 +57,7 @@ class VGGEncoder(nn.Module):
         kernel_Convenc: Tuple[int, int] = (3, 1),
         use_dropout: bool = False,
         dropout_p: float = 0.2,
+        block_dropout_indices: Tuple[int, int] = (2, 3),
     ):
         super().__init__()
         assert len(dim_ConvBlock) == len(layersNum_block)
