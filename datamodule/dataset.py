@@ -37,19 +37,16 @@ class CROHMEDataset(Dataset):
 
     def __getitem__(self, idx):
         fnames, imgs, captions = self.dataset[idx]
-        
+
         processed_imgs = []
         if self.lazy_load:
-            for item in imgs:
-                if isinstance(item, tuple):
-                    print(f"[WARN] Skipping unresolved image tuple {item}")
-                    continue
+            for p in fnames:
                 try:
-                    im = Image.open(item).convert("L")
+                    im = Image.open(p).convert("L")
                     im_np = np.array(im)
                     processed_imgs.append(self.transform(im_np))
                 except Exception as e:
-                    print(f"[WARN] Could not open image {item}: {e}")
+                    print(f"[WARN] Could not open image {p}: {e}")
                     continue
         else:
             for im in imgs:
