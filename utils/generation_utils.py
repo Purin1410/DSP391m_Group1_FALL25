@@ -4,14 +4,14 @@ from typing import List, Tuple
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
-from data.datamodule import CROHMEDatamodule
+from datamodule.datamodule import CROHMEDatamodule
 vocab = CROHMEDatamodule.shared_vocab
 vocab_size = len(vocab)
-from .utils import Hypothesis, ce_loss, to_tgt_output
+
+from .utils import Hypothesis, ce_loss
 from einops import rearrange
 from einops.einops import repeat
 from torch import FloatTensor, LongTensor
-
 from .beam_search import BeamSearchScorer
 
 # modified from
@@ -87,7 +87,6 @@ class DecodeModel(pl.LightningModule):
             device=device,
         )
 
-        # Chạy beam
         hyps, scores = self._beam_search(
             src=src,
             src_mask=src_mask,
@@ -164,10 +163,10 @@ class DecodeModel(pl.LightningModule):
             next_token_scores, next_tokens = torch.topk(
                 next_token_scores, 2 * beam_size, dim=1
             )
-            vocab_sz = next_token_logits.shape[-1]
+            # vocab_sz = next_token_logits.shape[-1]
 
-            next_indices = next_tokens // vocab_sz
-            next_tokens = next_tokens % vocab_sz
+            next_indices = next_tokens // vocab_size
+            next_tokens = next_tokens % vocab_size
 
             if cur_len == 1:
                 input_ids = repeat(input_ids, "b l -> (b m) l", m=beam_size)

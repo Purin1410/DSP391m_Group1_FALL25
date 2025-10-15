@@ -1,7 +1,7 @@
 # train.py
 from __future__ import annotations
 import argparse
-from typing import Any, Dict, List, Optional
+from typing import List
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import (
@@ -10,10 +10,10 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
     Callback,
 )
-from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger
 from sconf import Config
 
-from data.datamodule import CROHMEDatamodule
+from datamodule.datamodule import CROHMEDatamodule
 
 
 # -------- optional: log gradient norm ----------

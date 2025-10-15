@@ -2,7 +2,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from data.datamodule import CROHMEDatamodule
+from datamodule.datamodule import CROHMEDatamodule
 
 vocab = CROHMEDatamodule.shared_vocab
 

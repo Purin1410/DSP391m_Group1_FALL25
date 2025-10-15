@@ -98,7 +98,7 @@ data:
   gpu_max_memory: 1280000  
   pin_memory: true
   persistent_workers: true
-  free_memory: false
+  lazy_load: false
 
 wandb:
   name: "WAP"

@@ -1,7 +1,7 @@
 from typing import List, Tuple
 
 import torch
-from data.datamodule import CROHMEDatamodule
+from datamodule.datamodule import CROHMEDatamodule
 from torch import FloatTensor, LongTensor
 
 vocab = CROHMEDatamodule.shared_vocab
