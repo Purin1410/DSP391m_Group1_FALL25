@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 import pytorch_lightning as pl
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
+import torch
 
 from datamodule.datamodule import CROHMEDatamodule
 from datamodule.utils import Batch
@@ -145,11 +146,21 @@ class LitCoMER(pl.LightningModule):
             on_step=False,
             on_epoch=True,
         )
+    
+    def training_epoch_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
+    def validation_epoch_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
+    def training_step_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
+    def validation_step_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
 
     def test_step(self, batch: Batch, _):
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
         return batch.img_bases, [vocab.indices2label(h.seq) for h in hyps]
+    
 
     def test_epoch_end(self, test_outputs) -> None:
         exprate = self.exprate_recorder.compute()

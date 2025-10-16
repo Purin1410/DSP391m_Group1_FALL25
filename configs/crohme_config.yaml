@@ -30,13 +30,12 @@ model:
   reduction: 0.5
   bottleneck: true
   use_dropout: true
-  densenet_dropout: 0.2
+  encoder_dropout: 0.2
   # -------- decoder --------
   nhead: 8
   num_decoder_layers: 3
   dim_feedforward: 1024
   decoder_dropout: 0.3
-  encoder_dropout: 0.2
   dc: 32
   cross_coverage: true
   self_coverage: true
