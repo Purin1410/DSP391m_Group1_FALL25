@@ -137,12 +137,21 @@ class LitWAP(pl.LightningModule):
         # update ExpRate
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
         self.log("val_ExpRate", self.exprate_recorder, prog_bar=True, on_step=False, on_epoch=True)
-
+    
+    def training_epoch_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
+    def validation_epoch_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
+    def training_step_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
+    def validation_step_end(self, *args, **kwargs):
+        torch.cuda.empty_cache()
+        
     # ---------- Test ----------
     def test_step(self, batch, _):
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
         try:
-            from data import CROHMEDatamodule
+            from datamodule.datamodule import CROHMEDatamodule
             _v = CROHMEDatamodule.vocab
             pred_texts = [_v.indices2label(h.seq) if hasattr(_v, "indices2label") else h.seq for h in hyps]
         except Exception:
