@@ -7,7 +7,6 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.loggers import WandbLogger as Logger
 import argparse
 from sconf import Config
-from utils.callbacks import (GradNormCallback)
 
 
 
@@ -20,6 +19,7 @@ def train(config):
 
     # Model
     from lit_comer import LitCoMER
+    from utils.callbacks import (GradNormCallback)
     if config.trainer.resume_from_checkpoint is not None:
         print("Resuming from checkpoint: ", config.trainer.resume_from_checkpoint)
         model_module = LitCoMER.load_from_checkpoint(config.trainer.resume_from_checkpoint)
