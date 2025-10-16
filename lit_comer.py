@@ -33,37 +33,37 @@ class LitCoMER(pl.LightningModule):
         self.optimizer_cfg = mcfg.get("optimizer", {})
         self.optimizer_use = self.optimizer_cfg.get("use", "SGD")
         self.optimizer_params = {
-            "SGD": {
+            "SGD": 
                 optim.SGD(
                     self.parameters(),
                     lr              = self.optimizer_cfg.get("SGD", {}).get("lr", 0.08),
                     momentum        = self.optimizer_cfg.get("SGD", {}).get("momentum", 0.9),
                     weight_decay    = self.optimizer_cfg.get("SGD", {}).get("weight_decay", 1e-4),
                 )
-            },
-            "Adam": {
+            ,
+            "Adam": 
                 optim.Adam(
                     self.parameters(),
                     lr              = self.optimizer_cfg.get("Adam", {}).get("lr", 0.08),
                     betas           = self.optimizer_cfg.get("Adam", {}).get("betas", (0.9, 0.999)),
                 )
-            },
-            "AdamW": {
+            ,
+            "AdamW": 
                 optim.AdamW(
                     self.parameters(),
                     lr              = self.optimizer_cfg.get("AdamW", {}).get("lr", 0.08),
                     betas           = self.optimizer_cfg.get("AdamW", {}).get("betas", (0.9, 0.999)),
                     weight_decay    = self.optimizer_cfg.get("AdamW", {}).get("weight_decay", 1e-4),
                 )
-            },
-            "Adadelta": {
+            ,
+            "Adadelta": 
                 optim.Adadelta(
                     self.parameters(),
                     lr              = self.optimizer_cfg.get("Adadelta", {}).get("lr", 1),
                     weight_decay    = self.optimizer_cfg.get("Adadelta", {}).get("weight_decay", 1e-4),
                     eps             = self.optimizer_cfg.get("Adadelta", {}).get("eps", 1e-6),
                 )
-            },
+            ,
         }
         
         
