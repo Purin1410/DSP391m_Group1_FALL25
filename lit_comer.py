@@ -17,18 +17,19 @@ class LitCoMER(pl.LightningModule):
     def __init__(
         self,
         config: Dict[str, Any],
+        beam_size: int = 10,
+        max_len: int = 200,
+        alpha: float = 1.0,
+        early_stopping: bool = True,
+        temperature: float = 1.0,
     ):
         super().__init__()
-        self.save_hyperparameters()
         mcfg = config["model"]
+        self.save_hyperparameters()
+        
 
         # model
         self.comer_model = CoMER(config)
-        # beam search
-        self.beam_size = mcfg.get("beam_size", 10)
-        self.max_len = mcfg.get("max_len", 200)
-        self.alpha = mcfg.get("alpha", 1.0)      
-        self.temperature = mcfg.get("temperature", 1.0)
         #- -------------------------Optimizer ---------------------------------
         self.optimizer_cfg = mcfg.get("optimizer", {})
         self.optimizer_use = self.optimizer_cfg.get("use", "SGD")

@@ -27,6 +27,11 @@ def train(config):
         print("Training from new weights")
         model_module = LitCoMER(
             config = config,
+            beam_size = config.model.beam_size,
+            max_len = config.model.max_len,
+            alpha = config.model.alpha,
+            early_stopping = config.model.early_stopping,
+            temperature = config.model.temperature,
         )
 
    # Logger
