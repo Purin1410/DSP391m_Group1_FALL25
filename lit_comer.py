@@ -75,14 +75,14 @@ class LitCoMER(pl.LightningModule):
         self.scheduler_monitor  = self.scheduler_cfg.get("monitor", "val_ExpRate")
         # init scheduler params
         self.scheduler_params = {
-            "ReduceLROnPlateau": {
+            "ReduceLROnPlateau": 
                 optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer   = self.optimizer_params[self.optimizer_use],
                     mode        = self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("mode", "max"),
                     factor      = self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("factor", 0.25),
                     patience    = self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("patience", 12),
                 )
-            }
+            ,
         }
         
 
