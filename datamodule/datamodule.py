@@ -16,25 +16,26 @@ class CROHMEDatamodule(pl.LightningDataModule):
     ) -> None:
         super().__init__()
         self.config = config
-        self.zipfile_path               = self.config.data.zipfile_path
-        self.test_year                  = self.config.data.test_year
-        self.train_batch_size           = self.config.data.train_batch_size
-        self.eval_batch_size            = self.config.data.eval_batch_size
-        self.num_workers                = self.config.data.num_workers
-        self.scale_aug                  = self.config.data.scale_aug
-        self.gpu_max_memory             = self.config.data.gpu_max_memory
+        data_config = self.config.data
+        self.zipfile_path               = data_config.zipfile_path
+        self.test_year                  = data_config.test_year
+        self.train_batch_size           = data_config.train_batch_size
+        self.eval_batch_size            = data_config.eval_batch_size
+        self.num_workers                = data_config.num_workers
+        self.scale_aug                  = data_config.scale_aug
+        self.gpu_max_memory             = data_config.gpu_max_memory
         self.maxlen                     = self.config.model.max_len
-        self.free_memory                = self.config.data.free_memory
-        self.k_min                      = self.config.data.k_min
-        self.k_max                      = self.config.data.k_max
-        self.w_lo                       = self.config.data.w_lo
-        self.w_hi                       = self.config.data.w_hi
-        self.h_lo                       = self.config.data.h_lo
-        self.h_hi                       = self.config.data.h_hi
-        self.pin_memory                 = self.config.data.pin_memory
-        self.persistent_workers         = self.config.data.persistent_workers
+        self.lazy_load                  = data_config.lazy_load
+        self.k_min                      = data_config.k_min
+        self.k_max                      = data_config.k_max
+        self.w_lo                       = data_config.w_lo
+        self.w_hi                       = data_config.w_hi
+        self.h_lo                       = data_config.h_lo
+        self.h_hi                       = data_config.h_hi
+        self.pin_memory                 = data_config.pin_memory
+        self.persistent_workers         = data_config.persistent_workers
         if CROHMEDatamodule.shared_vocab is None:
-            CROHMEDatamodule.shared_vocab = Vocab(dict_path=config.data.dictionary_txt)
+            CROHMEDatamodule.shared_vocab = Vocab(dict_path=data_config.dictionary_txt)
         self.vocab = CROHMEDatamodule.shared_vocab
         
         print(f"Load data from: {self.zipfile_path}")
@@ -45,6 +46,8 @@ class CROHMEDatamodule(pl.LightningDataModule):
         fnames = batch[0]
         images_x = batch[1]
         seqs_y = [self.vocab.words2indices(x) for x in batch[2]]
+        
+        # images_x = [torch.as_tensor(s, dtype=torch.float32).unsqueeze(0) if not torch.is_tensor(s) else s for s in images_x]
 
         heights_x = [s.size(1) for s in images_x]
         widths_x = [s.size(2) for s in images_x]
@@ -75,7 +78,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                                             batch_Imagesize = self.gpu_max_memory,
                                             maxlen          = self.maxlen, 
                                             maxImagesize    = self.gpu_max_memory,
-                                            free_memory     = self.free_memory,
+                                            lazy_load       = self.lazy_load,
                                             ),
                 is_train    = True,
                 scale_aug   = self.scale_aug,
@@ -85,6 +88,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                 w_hi        = self.config.data.w_hi,
                 h_lo        = self.config.data.h_lo,
                 h_hi        = self.config.data.h_hi,
+                lazy_load   = self.lazy_load,
             )
             # Val_dataset
             self.val_dataset = CROHMEDataset(
@@ -94,7 +98,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                                             batch_Imagesize = self.gpu_max_memory,
                                             maxlen          = self.maxlen, 
                                             maxImagesize    = self.gpu_max_memory,
-                                            free_memory     = self.free_memory,
+                                            lazy_load     = self.lazy_load,
                                             ),
                 is_train    = False,
                 scale_aug   = self.scale_aug,
@@ -104,6 +108,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                 w_hi        = self.config.data.w_hi,
                 h_lo        = self.config.data.h_lo,
                 h_hi        = self.config.data.h_hi,
+                lazy_load   = self.lazy_load,
             )
         if stage == "test" or stage is None:
             self.test_dataset = CROHMEDataset(
@@ -113,7 +118,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                                             batch_Imagesize = self.gpu_max_memory,
                                             maxlen          = self.maxlen, 
                                             maxImagesize    = self.gpu_max_memory,
-                                            free_memory     = self.free_memory,
+                                            lazy_load     = self.lazy_load,
                                             ),
                 is_train    = False,
                 scale_aug   = self.scale_aug,
@@ -123,6 +128,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                 w_hi        = self.config.data.w_hi,
                 h_lo        = self.config.data.h_lo,
                 h_hi        = self.config.data.h_hi,
+                lazy_load   = self.lazy_load,
             )
 
     def train_dataloader(self):

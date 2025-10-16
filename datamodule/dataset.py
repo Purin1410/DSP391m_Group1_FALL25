@@ -1,6 +1,7 @@
 import torchvision.transforms as tr
 from torch.utils.data.dataset import Dataset
-
+from PIL import Image
+import numpy as np
 from .transforms import ScaleAugmentation, ScaleToLimitRange
 
 class CROHMEDataset(Dataset):
@@ -13,9 +14,11 @@ class CROHMEDataset(Dataset):
                 w_lo: float,
                 w_hi: float,
                 h_lo: float,
-                h_hi: float) -> None:
+                h_hi: float,
+                lazy_load: bool = False) -> None:
         super().__init__()
         self.dataset = dataset
+        self.lazy_load = lazy_load
 
         trans_list = []
         if is_train and scale_aug:
@@ -33,11 +36,25 @@ class CROHMEDataset(Dataset):
         self.transform = tr.Compose(trans_list)
 
     def __getitem__(self, idx):
-        fname, img, caption = self.dataset[idx]
+        fnames, imgs, captions = self.dataset[idx]
 
-        img = [self.transform(im) for im in img]
+        processed_imgs = []
+        if self.lazy_load:
+            for p in fnames:
+                try:
+                    im = Image.open(p).convert("L")
+                    im_np = np.array(im)
+                    processed_imgs.append(self.transform(im_np))
+                except Exception as e:
+                    print(f"[WARN] Could not open image {p}: {e}")
+                    continue
+        else:
+            for im in imgs:
+                if not isinstance(im, np.ndarray):
+                    im = np.array(im)
+                processed_imgs.append(self.transform(im))
 
-        return fname, img, caption
+        return fnames, processed_imgs, captions
 
     def __len__(self):
         return len(self.dataset)

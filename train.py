@@ -9,7 +9,6 @@ from pytorch_lightning.loggers import WandbLogger as Logger
 import argparse
 from sconf import Config
 from utils.callbacks import (GradNormCallback)
-import subprocess
 
 
 
@@ -60,14 +59,8 @@ def train(config):
         default_root_dir        = config.trainer.default_root_dir,
         resume_from_checkpoint  = config.trainer.resume_from_checkpoint,
     )
-    try:
-        trainer.fit(model_module,data_module)
-    except Exception as e:
-        print(f"Training crashed due to: {e}")
-    finally:
-        print("Ensuring final upload to OneDrive before exit...")
-        subprocess.run(f"rclone copy {local_dir} {remote_dir} --update --ignore-existing --verbose", shell=True, check=True)
-        print("Final upload completed.")
+    
+    trainer.fit(model_module,data_module)
 
 
 if __name__ == "__main__":
