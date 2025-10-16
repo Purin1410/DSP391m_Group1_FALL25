@@ -61,7 +61,7 @@ class LitCoMER(pl.LightningModule):
                     self.parameters(),
                     lr              = self.optimizer_cfg.get("Adadelta", {}).get("lr", 1),
                     weight_decay    = self.optimizer_cfg.get("Adadelta", {}).get("weight_decay", 1e-4),
-                    epsilon         = self.optimizer_cfg.get("Adadelta", {}).get("epsilon", 1e-6),
+                    eps             = self.optimizer_cfg.get("Adadelta", {}).get("eps", 1e-6),
                 )
             },
         }
