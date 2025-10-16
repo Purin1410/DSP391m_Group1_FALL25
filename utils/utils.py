@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from datamodule.datamodule import CROHMEDatamodule
 vocab = CROHMEDatamodule.shared_vocab
+
 from einops import rearrange
 from torch import LongTensor
 from torchmetrics import Metric

@@ -1,6 +1,5 @@
 import pytorch_lightning as pl
 from datamodule import CROHMEDatamodule
-from lit_comer import LitCoMER
 from pytorch_lightning.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
@@ -20,6 +19,7 @@ def train(config):
     data_module = CROHMEDatamodule(config = config)
 
     # Model
+    from lit_comer import LitCoMER
     if config.trainer.resume_from_checkpoint is not None:
         print("Resuming from checkpoint: ", config.trainer.resume_from_checkpoint)
         model_module = LitCoMER.load_from_checkpoint(config.trainer.resume_from_checkpoint)
