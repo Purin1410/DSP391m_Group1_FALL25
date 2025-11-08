@@ -1,0 +1,26 @@
+
+============================================================
+                    EVALUATION RESULTS
+============================================================
+
+Dataset Statistics:
+  Total Samples: 2,300
+
+Core Metrics:
+  Mean Edit Score:        95.1379%
+  BLEU-4 Score:           93.0731%
+  Character Error Rate:    0.0191
+
+Error Threshold Analysis:
+  Exact Match Rate:       73.9130% (0 errors)
+  Error ≤ 1:              84.6522%
+  Error ≤ 2:              90.1304%
+  Error ≤ 3:              93.6522%
+
+Detailed Error Distribution:
+  Errors ≤ 0:  1,700 samples ( 73.91%)
+  Errors ≤ 1:  1,947 samples ( 84.65%)
+  Errors ≤ 2:  2,073 samples ( 90.13%)
+  Errors ≤ 3:  2,154 samples ( 93.65%)
+
+============================================================

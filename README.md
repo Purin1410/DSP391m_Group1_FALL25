@@ -1,237 +1,143 @@
-# DSP391m_Group1_FALL25
+# Uni-MuMER: Unified Multi-Task Fine-Tuning of Vision-Language Model for Handwritten Mathematical Expression Recognition
 
-# 🧮 Handwritten Mathematical Expression Recognition (HMER)  
-### Data Science Project — FPT University | DSP391-FA25-AI1802
+<!-- ## 🏠 <a href="https://xxxx" target="_blank">Project Page</a> | <a href="https://arxiv.org/abs/xxxxx" target="_blank">Paper</a> | <a href="https://huggingface.co/xxxxx" target="_blank">Model Weights</a>  -->
 
+<p align="center">
+    <a href="https://arxiv.org/abs/2505.23566"><img src="https://img.shields.io/badge/📄-Paper-red"></a>
+    <a href="https://huggingface.co/collections/phxember/uni-mumer-68bfba4747e9289232f3d89e"><img src="https://img.shields.io/badge/🤗 HuggingFace-Data & Models-green"></a>
+</p>
 
-### <b><span style="color:red">NOTE: LOOK AT THE DIFFERENCE BRANCH TO SEE THE DIFFERENCE CODE MODEL</span></b>
-
----
-
-## 🇬🇧 English Version
-
-### 📘 Overview
-This project aims to develop an **end-to-end system for recognizing handwritten mathematical expressions (HMER)** and converting them into valid **LaTeX** strings.  
-It was conducted as part of the **Data Science Project (DSP391m)** course at **FPT University**, HCMC campus.
-
-Handwritten mathematical recognition is much more complex than standard OCR, due to:
-- **2D spatial structures** (fractions, subscripts/superscripts, roots)
-- **High handwriting variability**
-- **Symbol ambiguity**
-- **Strict LaTeX grammar requirements**
-
-We explore and compare **three model families**:
-1. **WAP (CNN + RNN Attention)** – baseline sequence-to-sequence model  
-2. **CoMER (Transformer + Coverage)** – modern Transformer with attention refinement  
-3. **Qwen2.5-VL (Vision-Language Model fine-tuning)** – SFT approach for multimodal adaptation  
-
----
-
-### 🎯 Objectives
-- Convert handwritten expression images into structurally correct LaTeX formulas.  
-- Achieve strong benchmark scores on **CROHME** and **HME100K** datasets.  
-- Provide model comparisons with detailed quantitative and qualitative analysis.  
-- Deliver a reproducible public codebase with configuration and logs via **Weights & Biases (W&B)**.  
-- Deploy a runnable **Gradio demo** for public interaction.  
-
----
-
-### 🧩 Methodology
-**Datasets Used:**  
-- **HME100K** — large-scale offline handwritten dataset for pretraining.  
-- **CROHME** — standard academic benchmark for fine-tuning and evaluation.  
-
-**Training Strategy:**  
-- Stage A: Pretraining on HME100K (warm-up / full).  
-- Stage B: Fine-tuning on CROHME (multiple years).  
-- Stage C: Evaluation on benchmark datasets, with robustness tests (noise, blur, etc.).  
-
-**Metrics:**  
-- Expression Recognition Rate (**ExpRate**)  
-- Character / Word Error Rate (**CER**, **WER**)  
-- Token accuracy, latency (ms)  
-
-**Experiment Logging:**  
-All training sessions and results are tracked with **Weights & Biases**, using YAML/JSON configs for full reproducibility.
-
----
-
-### 🏗️ System Design
-**Pipeline:**
-1. Data Loading → Normalization → Augmentation  
-2. Model Training (WAP / CoMER / Qwen2.5-VL)  
-3. LaTeX Validator (rule-based syntax check)  
-4. Evaluation on CROHME / HME100K  
-5. Demo Deployment via Gradio  
+<!-- [![arXiv](https://img.shields.io/badge/arXiv-2408.08578-b31b1b.svg)](https://arxiv.org/abs/24xxxx) -->
 
 
-### Code Structure
+
+## Description
+We introduce Uni-MuMER, which fully fine-tunes the Qwen2.5-VL-3B model for the HMER task without modifying its architecture, effectively injecting domain-specific knowledge into a generalist framework. Our method integrates three data-driven tasks: Tree-Aware Chain-of-Thought (Tree-CoT) for structured spatial reasoning, Error-Driven Learning (EDL) for reducing confusion among visually similar characters, and Symbol Counting (SC) for improving recognition consistency in long expressions. 
+
+
+
+![Uni-MuMER](./asserts/fig/main_fig.drawio_00.png)
+
+Experiments on the CROHME and HME100K datasets show that Uni-MuMER achieves new state-of-the-art performance, surpassing the best lightweight specialized model, SSAN, by 16.31% and the top-performing VLM Gemini2.5-flash by 24.42% in the zero-shot setting.
+
+![intro](./asserts/fig/CROHME_00.png)
+
+## 📢 Updates
+- **2025-09-18**: This work got accepted to NeurIPS 2025 as a Spotlight (688/21575).
+- **2025-09-09** : Release dataset ([Uni-MuMER-Data](https://huggingface.co/datasets/phxember/Uni-MuMER-Data) and [Uni-MuMER-Valid-Test](https://huggingface.co/datasets/phxember/Uni-MuMER-Valid-Test)) and training code. [See Training]
+- **2025-06-02**: Release of model weights and inference scripts.
+
+## 📦 Dataset Preparation
+
+1. **Download** `data.zip` from GitHub, Huggingface, or [Google Drive link](https://drive.google.com/drive/folders/1T8a3WxICZVl1NJ99hu9tuuqqNZoxGhXq?usp=sharing).
+2. **Unzip** it at the project root. After extraction, you should have:
+
 ```
----
-repo/
-├── configs/        # YAML configs for datasets and model parameters
-├── data/           # Dataset processing and normalization scripts
-├── models/         # Model definitions (WAP, CoMER, Qwen2.5-VL)
-├── utils/          # Logging, metrics, visualization helpers
-├── train.py        # Main training entry point
-├── eval.py         # Evaluation on CROHME and HME100K
-├── demo_app.py     # Gradio UI demo interface
-├── notebooks/      # Interactive Jupyter demos
-└── README.md       # Documentation and setup guide
----
+data
+├── CROHME/
+├── CROHME2023/
+├── HME100K/
+├── Im2LaTeXv2/
+├── MathWriting/
+└── MNE/
+```
+<!--  -->
+
+
+
+
+
+
+## 🏃 Inference
+After the dataset is in place, you can run **batch inference** over all three test sets with one of the two commands below.
+
+### Shell wrapper (recommended)
+```bash
+bash eval/eval_crohme.sh  -i <input-dir> -o <output-dir> -m <model> -b <batch_size>
+```
+**Example**
+```bash
+bash eval/eval_all.sh -m models/Uni-MuMER-3B -s test1 -b 32768
 ```
 
-
-### 🧪 Results & Discussion
-- Comparative study: WAP vs. CoMER vs. Qwen2.5  
-- Ablation: warm-up vs. full pretraining  
-- Robustness under visual perturbations (noise, blur)  
-- Demo performance (inference latency, UX feedback)  
-
-**Future Work:**
-- Grammar-aware beam search decoding  
-- Curriculum learning with multi-dataset scheduling  
-- Scaling to larger multimodal vision-language models  
-
-
-
-### 👥 Team Members
-| Name | Role |
-|------|------|
-| **Nguyen Minh Khoa** | Leader – Modeling & Training Lead |
-| **Phan Van Hai Nam** | Data & EDA, Preprocessing, W&B Pipeline |
-| **Nguyen Ngoc Thien Phu** | Demo/UI, Evaluation, Documentation |
-
-**Supervisor:** Capstone Project DSP391m — FPT University  
-
-
-
-### ⚖️ Ethics & Licensing
-All datasets used are **publicly available** (CROHME, HME100K).  
-No personal data was collected.  
-Outputs are limited to mathematical LaTeX strings.  
-This project is for **academic research only**, in compliance with DSP391m ethics standards.
-
-
-
-### 📚 References
-1. Zhang et al., *Watch, Attend and Parse: An End-to-End Neural Network Based Approach to Handwritten Mathematical Expression Recognition*, Pattern Recognition, 2017.  
-2. Zhao et al., *CoMER: Modeling Coverage for Transformer-based Handwritten Mathematical Expression Recognition*, ECCV 2022.  
-3. Mouchère et al., *Competition on Recognition of Online Handwritten Mathematical Expressions (CROHME)*, ICDAR 2014.  
-4. Phymond et al., *HME100K: A Large-Scale Real-Scene Offline Dataset for Handwritten Mathematical Expressions*, GitHub, 2021.  
-
-
-
-## 🇻🇳 Phiên bản tiếng Việt
-
-### <b><span style="color:red">GHI CHÚ: MỖI 1 MODEL ĐƯỢC ĐỂ TRONG TỪNG BRANCH KHÁC NHAU, XIN HÃY CHUYỂN BRANCH ĐỂ XEM TỪNG REPO RÕ HƠN</span></b>
-
-
-### 📘 Tổng quan
-Dự án này xây dựng **hệ thống nhận dạng biểu thức toán học viết tay (HMER)** từ hình ảnh và chuyển đổi sang **mã LaTeX hợp lệ**.  
-Được thực hiện trong khuôn khổ môn học **Đồ án Khoa học Dữ liệu (DSP391m)** tại **Đại học FPT**, cơ sở TP.HCM.
-
-Bài toán HMER phức tạp hơn OCR văn bản thông thường vì:
-- Cấu trúc **hai chiều** (phân số, chỉ số, căn, v.v.)  
-- **Nhiều kiểu chữ viết tay khác nhau**  
-- **Dễ nhầm ký hiệu**  
-- **Quy tắc cú pháp LaTeX nghiêm ngặt**  
-
-Nhóm tiến hành thử nghiệm với **ba họ mô hình chính**:
-1. **WAP (CNN + RNN Attention)** – mô hình cơ sở  
-2. **CoMER (Transformer + Coverage)** – mô hình hiện đại dựa trên attention refinement  
-3. **Qwen2.5-VL (Vision-Language Fine-tuning)** – tinh chỉnh mô hình thị giác-ngôn ngữ hiện đại  
-
----
-
-### 🎯 Mục tiêu
-- Chuyển đổi ảnh biểu thức toán viết tay thành chuỗi LaTeX hợp lệ.  
-- Đạt độ chính xác cao trên bộ dữ liệu **CROHME** và **HME100K**.  
-- Phân tích, so sánh và đánh giá ưu/nhược điểm của từng mô hình.  
-- Cung cấp **mã nguồn công khai**, có khả năng tái hiện kết quả.  
-- Triển khai **demo trực quan với Gradio** để trình diễn hệ thống.  
-
----
-
-### 🧩 Phương pháp
-**Dữ liệu huấn luyện:**  
-- **HME100K** (ngoại tuyến, quy mô lớn) – dùng cho giai đoạn tiền huấn luyện.  
-- **CROHME** – dùng cho tinh chỉnh và đánh giá mô hình.  
-
-**Chiến lược huấn luyện:**  
-- Giai đoạn A: Pretrain trên HME100K (warm-up / full).  
-- Giai đoạn B: Fine-tune trên CROHME.  
-- Giai đoạn C: Đánh giá và kiểm tra độ bền mô hình.  
-
-**Chỉ số đánh giá:**  
-- **ExpRate (Expression Recognition Rate)**  
-- **CER/WER**, độ chính xác token, tốc độ xử lý.  
-
-**Theo dõi thí nghiệm:**  
-Sử dụng **Weights & Biases (W&B)** để log kết quả và checkpoint, cấu hình YAML/JSON đảm bảo tái hiện được toàn bộ pipeline.
-
----
-
-### 🏗️ Thiết kế hệ thống
-**Quy trình tổng quát:**
-1. Tiền xử lý & nạp dữ liệu  
-2. Huấn luyện mô hình (WAP / CoMER / Qwen2.5-VL)  
-3. Kiểm tra cú pháp LaTeX  
-4. Đánh giá kết quả trên CROHME và HME100K  
-5. Triển khai demo qua Gradio  
-
-**Cấu trúc mã nguồn:**
-```
-repo/
-├── configs/        # Cấu hình tham số
-├── data/           # Tiền xử lý dữ liệu
-├── models/         # Mô hình huấn luyện
-├── utils/          # Tiện ích logging, metric
-├── train.py        # Huấn luyện chính
-├── eval.py         # Đánh giá
-├── demo_app.py     # Giao diện demo
-└── notebooks/      # Notebook minh họa
-└──  README.md      # Hướng dẫn đọc và setup
+### Direct Python call
+```bash
+python scripts/vllm_infer.py --input-dir <input-dir> --output-dir <output-dir> --model <model> --batch_size <batch_size>
 ```
 
----
+ **Tip:** 
+  - To select GPUs on multi‑GPU machines just export `CUDA_VISIBLE_DEVICES` before running the script, e.g., `export CUDA_VISIBLE_DEVICES=1,2`
 
-### 🧪 Kết quả & Thảo luận
-- So sánh hiệu năng giữa WAP – CoMER – Qwen2.5  
-- Đánh giá ảnh hưởng của chiến lược pretraining  
-- Thử nghiệm độ bền (nhiễu Gaussian, mờ, giảm chất lượng ảnh)  
-- Đánh giá thời gian phản hồi demo  
+  - For batch_size, you can use the `--batch_size` argument to control the number of samples per `vLLM.generate()` call. The default value is 32768, which is prevented from being too large to avoid OOM errors. 
+<!-- $$ -->
 
-**Hướng mở rộng:**
-- Khảo sát mô hình LLM đa phương thức quy mô lớn hơn  
 
----
+## 🏋️ Training
+Our training code depends on [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory).
 
-### 👥 Thành viên
-| Họ và tên | Vai trò |
-|------------|----------|
-| **Nguyễn Minh Khoa** | Trưởng nhóm – Huấn luyện và tích hợp mô hình |
-| **Phan Văn Hải Nam** | Xử lý dữ liệu, EDA, pipeline theo dõi W&B |
-| **Nguyễn Ngọc Thiên Phú** | Phát triển giao diện Gradio, đánh giá và tài liệu hóa |
+For training dependencies, please refer to [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) or requirements_training.txt.
 
-**Giảng viên hướng dẫn:** Môn DSP391m – Đại học FPT  
+```bash
+llamafactory-cli train train/Uni-MuMER-train.yaml
+```
 
----
 
-### ⚖️ Đạo đức & Bản quyền
-- Tất cả dữ liệu (CROHME, HME100K) đều **công khai và hợp pháp**.  
-- Không thu thập dữ liệu cá nhân.  
-- Sản phẩm chỉ phục vụ **mục đích nghiên cứu học thuật**.  
 
----
 
-### 📚 Tài liệu tham khảo
-1. Zhang et al., *Watch, Attend and Parse*, Pattern Recognition, 2017.  
-2. Zhao et al., *CoMER: Modeling Coverage for Transformer-based HMER*, ECCV 2022.  
-3. Mouchère et al., *CROHME Dataset*, ICDAR 2014.  
-4. Phymond et al., *HME100K Dataset*, GitHub 2021.  
 
----
 
-> 📌 *This project is part of FPT University’s Data Science Capstone Program — designed for exploring deep learning solutions to complex OCR challenges in academic and industrial research.*
+<!-- ## 📢 Updates -->
+
+
+<!-- ## 
+
+
+## 📦 Installation
+
+
+
+
+
+
+
+## 🗃 Dataset -->
+
+
+## ✅ TODO
+- [x] Inference code and pretrained models.
+- [x] Evaluation code.
+- [x] Training code.
+- [x] Training data.
+- [ ] Preprocess code.
+
+
+## 🙏 Acknowledgements
+
+Thanks to the following projects:
+
+- [CoMER](https://github.com/Green-Wood/CoMER)
+- [PosFormer](https://github.com/SJTU-DeepVisionLab/PosFormer)
+- [TAMER](https://github.com/qingzhenduyu/TAMER)
+- [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)
+- [MathNet](https://github.com/felix-schmitt/MathNet)
+
+
+
+## 📝 Citation
+If you find Uni-MuMER useful for your study or research, please cite our paper with:
+```bibtex
+@article{li2025unimumer,
+  title = {Uni-MuMER: Unified Multi-Task Fine-Tuning of Vision-Language Model for Handwritten Mathematical Expression Recognition},
+  author = {Li, Yu and Jiang, Jin and Zhu, Jianhua and Peng, Shuai and Wei, Baole and Zhou, Yuxuan and Gao, Liangcai},
+  year = {2025},
+  journal={arXiv preprint arXiv:2505.23566},
+}
+
+```
+
+
+<!-- ## 📄 License -->
+
+
+
 
