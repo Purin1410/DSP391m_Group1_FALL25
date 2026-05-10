@@ -2,9 +2,6 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from datamodule.datamodule import CROHMEDatamodule
-vocab = CROHMEDatamodule.shared_vocab
-
 from einops import rearrange
 from torch import LongTensor
 from torchmetrics import Metric
@@ -42,17 +39,15 @@ class Hypothesis:
 
 
 class ExpRateRecorder(Metric):
-    def __init__(self, dist_sync_on_step=False):
+    def __init__(self, vocab_info, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.vocab_info = vocab_info
 
         self.add_state("total_line", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("rec", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
     def update(self, indices_hat: List[List[int]], indices: List[List[int]]):
         for pred, truth in zip(indices_hat, indices):
-            pred = vocab.indices2label(pred)
-            truth = vocab.indices2label(truth)
-
             is_same = pred == truth
 
             if is_same:
@@ -68,7 +63,7 @@ class ExpRateRecorder(Metric):
 def ce_loss(
     output_hat: torch.Tensor,
     output: torch.Tensor,
-    ignore_idx: int = vocab.PAD_IDX,
+    ignore_idx: int,
     reduction: str = "mean",
 ) -> torch.Tensor:
     """comput cross-entropy loss
@@ -91,6 +86,9 @@ def to_tgt_output(
     tokens: Union[List[List[int]], List[LongTensor]],
     direction: str,
     device: torch.device,
+    sos_id: int,
+    eos_id: int,
+    pad_id: int,
     pad_to_len: Optional[int] = None,
 ) -> Tuple[LongTensor, LongTensor]:
     """Generate tgt and out for indices
@@ -115,12 +113,12 @@ def to_tgt_output(
 
     if direction == "l2r":
         tokens = tokens
-        start_w = vocab.SOS_IDX
-        stop_w = vocab.EOS_IDX
+        start_w = sos_id
+        stop_w = eos_id
     else:
         tokens = [torch.flip(t, dims=[0]) for t in tokens]
-        start_w = vocab.EOS_IDX
-        stop_w = vocab.SOS_IDX
+        start_w = eos_id
+        stop_w = sos_id
 
     batch_size = len(tokens)
     lens = [len(t) for t in tokens]
@@ -131,13 +129,13 @@ def to_tgt_output(
 
     tgt = torch.full(
         (batch_size, length),
-        fill_value=vocab.PAD_IDX,
+        fill_value=pad_id,
         dtype=torch.long,
         device=device,
     )
     out = torch.full(
         (batch_size, length),
-        fill_value=vocab.PAD_IDX,
+        fill_value=pad_id,
         dtype=torch.long,
         device=device,
     )

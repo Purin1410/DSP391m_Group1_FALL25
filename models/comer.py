@@ -10,10 +10,13 @@ from .decoder import Decoder
 from .encoder import Encoder
 
 
+from datamodule.vocab import VocabInfo
+
 class CoMER(pl.LightningModule):
     def __init__(
         self,
         config: Dict[str, Any],
+        vocab_info: VocabInfo,
     ):
         super().__init__()
         mcfg = config["model"]
@@ -33,6 +36,7 @@ class CoMER(pl.LightningModule):
         dc                  = mcfg.get("dc", 32)
         cross_coverage      = mcfg.get("cross_coverage", True)
         self_coverage       = mcfg.get("self_coverage", True)
+        arm_norm_impl       = mcfg.get("arm_norm_impl", "legacy")
 
         self.encoder = Encoder(
             d_model=d_model, 
@@ -52,6 +56,8 @@ class CoMER(pl.LightningModule):
             dc=dc,
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
+            vocab_info=vocab_info,
+            arm_norm_impl=arm_norm_impl,
         )
 
     def forward(

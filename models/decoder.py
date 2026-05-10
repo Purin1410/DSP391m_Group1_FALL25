@@ -5,9 +5,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch import FloatTensor, LongTensor
 
-from datamodule.datamodule import CROHMEDatamodule
-vocab = CROHMEDatamodule.shared_vocab
-vocab_size = len(vocab)
+from datamodule.vocab import VocabInfo
 
 from .pos_enc import WordPosEnc
 from .transformer.arm import AttentionRefinementModule
@@ -27,6 +25,7 @@ def _build_transformer_decoder(
     dc: int,
     cross_coverage: bool,
     self_coverage: bool,
+    arm_norm_impl: str = "legacy",
 ) -> nn.TransformerDecoder:
     decoder_layer = TransformerDecoderLayer(
         d_model=d_model,
@@ -35,7 +34,7 @@ def _build_transformer_decoder(
         dropout=dropout,
     )
     if cross_coverage or self_coverage:
-        arm = AttentionRefinementModule(nhead, dc, cross_coverage, self_coverage)
+        arm = AttentionRefinementModule(nhead, dc, cross_coverage, self_coverage, norm_impl=arm_norm_impl)
     else:
         arm = None
 
@@ -54,11 +53,14 @@ class Decoder(DecodeModel):
         dc: int,
         cross_coverage: bool,
         self_coverage: bool,
+        vocab_info: VocabInfo,
+        arm_norm_impl: str = "legacy",
     ):
         super().__init__()
+        self.vocab_info = vocab_info
 
         self.word_embed = nn.Sequential(
-            nn.Embedding(vocab_size, d_model), nn.LayerNorm(d_model)
+            nn.Embedding(vocab_info.vocab_size, d_model), nn.LayerNorm(d_model)
         )
 
         self.pos_enc = WordPosEnc(d_model=d_model)
@@ -74,17 +76,22 @@ class Decoder(DecodeModel):
             dc=dc,
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
+            arm_norm_impl=arm_norm_impl,
         )
 
-        self.proj = nn.Linear(d_model, vocab_size)
+        self.proj = nn.Linear(d_model, vocab_info.vocab_size)
+        self._causal_mask_cache = None
 
     def _build_attention_mask(self, length):
-        # lazily create causal attention mask, with full attention between the vision tokens
-        # pytorch uses additive attention mask; fill with -inf
+        if self._causal_mask_cache is not None and self._causal_mask_cache.size(0) >= length:
+            return self._causal_mask_cache[:length, :length]
+
+        # lazily create causal attention mask
         mask = torch.full(
             (length, length), fill_value=1, dtype=torch.bool, device=self.device
         )
         mask.triu_(1)  # zero out the lower diagonal
+        self._causal_mask_cache = mask
         return mask
 
     def forward(
@@ -106,9 +113,9 @@ class Decoder(DecodeModel):
         FloatTensor
             [b, l, vocab_size]
         """
-        _, l = tgt.size()
+        B_tgt, l = tgt.size()
         tgt_mask = self._build_attention_mask(l)
-        tgt_pad_mask = tgt == vocab.PAD_IDX
+        tgt_pad_mask = tgt == self.vocab_info.pad_id
 
         tgt = self.word_embed(tgt)  # [b, l, d]
         tgt = self.pos_enc(tgt)  # [b, l, d]
@@ -137,5 +144,13 @@ class Decoder(DecodeModel):
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
     ) -> FloatTensor:
         assert len(src) == 1 and len(src_mask) == 1
-        word_out = self(src[0], src_mask[0], input_ids)
+        s, sm = src[0], src_mask[0]
+        B_tgt = input_ids.shape[0]
+        B_src = s.shape[0]
+        if B_tgt > B_src:
+            assert B_tgt % B_src == 0
+            m = B_tgt // B_src
+            s = s.unsqueeze(1).expand(-1, m, -1, -1, -1).contiguous().view(B_tgt, s.shape[1], s.shape[2], s.shape[3])
+            sm = sm.unsqueeze(1).expand(-1, m, -1, -1).contiguous().view(B_tgt, sm.shape[1], sm.shape[2])
+        word_out = self(s, sm, input_ids)
         return word_out

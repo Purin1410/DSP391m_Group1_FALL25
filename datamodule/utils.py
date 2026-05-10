@@ -13,165 +13,81 @@ from pathlib import Path
 Data = List[Tuple[str, object, List[str]]]
 
 
-# ---------------------------------------------------------------------
-# Batch grouping
-# ---------------------------------------------------------------------
-def data_iterator(
-    data: Data,
-    batch_size: int,
-    batch_Imagesize: int = 32e4,
-    maxlen: int = 200,
-    maxImagesize: int = 32e4,
-):
-    """
-    Return data as:
-    [
-      ([fname1,...], [feature1,...], [label1,...]),
-      ...
-    ]
-    """
-    fname_batch, feature_batch, label_batch = [], [], []
-    fname_total, feature_total, label_total = [], [], []
+from torch.utils.data import Sampler
+import random
 
-    biggest_image_size = 0
-    data.sort(key=lambda x: x[1].size[0] * x[1].size[1] if hasattr(x[1], "size") else x[1][0] * x[1][1])
+class BucketedBatchSampler(Sampler):
+    def __init__(self, data: Data, max_pixels_per_batch: int, max_batch_size: int, shuffle: bool = True, drop_last: bool = False, maxlen: int = 200, max_image_size: int = 32e4):
+        self.data = data
+        self.max_pixels_per_batch = max_pixels_per_batch
+        self.max_batch_size = max_batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.maxlen = maxlen
+        self.max_image_size = max_image_size
+        
+        self.batches = self._build_batches()
 
-    i = 0
-    for fname, fea, lab in data:
-        if hasattr(fea, "size"):
-            w, h = fea.size
-            fea_arr = np.array(fea)
-        else:
-            w, h = fea
-            fea_arr = fea  # metadata mode
-
-        size = w * h
-        if size > biggest_image_size:
-            biggest_image_size = size
-        batch_image_size = biggest_image_size * (i + 1)
-
-        if len(lab) > maxlen:
-            pass
-            # print("sentence", i, "length bigger than", maxlen, "ignore")
-        elif size > maxImagesize:
-            pass
-            # print(f"image: {fname} size: {w} x {h} =  bigger than {maxImagesize}, ignore")
-        else:
-            if batch_image_size > batch_Imagesize or i == batch_size:
-                fname_total.append(fname_batch)
-                feature_total.append(feature_batch)
-                label_total.append(label_batch)
-                i = 0
+    def _build_batches(self):
+        # Create list of indices
+        indices = list(range(len(self.data)))
+        
+        # Function to get area
+        def get_area(idx):
+            fea = self.data[idx][1]
+            if hasattr(fea, "size"):
+                return fea.size[0] * fea.size[1]
+            return fea[0] * fea[1]
+            
+        # Filter indices by maxlen and max_image_size
+        valid_indices = []
+        for idx in indices:
+            _, fea, lab = self.data[idx]
+            size = get_area(idx)
+            if len(lab) > self.maxlen:
+                continue
+            if size > self.max_image_size:
+                continue
+            valid_indices.append(idx)
+            
+        valid_indices.sort(key=get_area)
+        
+        batches = []
+        current_batch = []
+        biggest_image_size = 0
+        
+        for idx in valid_indices:
+            size = get_area(idx)
+            if size > biggest_image_size:
                 biggest_image_size = size
-                fname_batch, feature_batch, label_batch = [], [], []
+            
+            batch_image_size = biggest_image_size * (len(current_batch) + 1)
+            
+            if batch_image_size > self.max_pixels_per_batch or len(current_batch) == self.max_batch_size:
+                if len(current_batch) > 0:
+                    batches.append(current_batch)
+                current_batch = []
+                biggest_image_size = size
+                
+            current_batch.append(idx)
+            
+        if len(current_batch) > 0 and not self.drop_last:
+            batches.append(current_batch)
+            
+        print(f"total {len(batches)} batch data loaded")
+        return batches
 
-            fname_batch.append(fname)
-            feature_batch.append(fea_arr)
-            label_batch.append(lab)
-            i += 1
+    def __iter__(self):
+        if self.shuffle:
+            random.shuffle(self.batches)
+        return iter(self.batches)
 
-    # last batch
-    fname_total.append(fname_batch)
-    feature_total.append(feature_batch)
-    label_total.append(label_batch)
+    def __len__(self):
+        return len(self.batches)
 
-    print("total ", len(feature_total), "batch data loaded")
-    return list(zip(fname_total, feature_total, label_total))
-
-
-# ---------------------------------------------------------------------
-# Helper: resolve image paths
-# ---------------------------------------------------------------------
-def _resolve_image_path(
-    img_dir: Path,
-    stem: str,
-    exts: Sequence[str] = (".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
-) -> Optional[Path]:
-    p = img_dir / stem
-    if p.exists():
-        return p
-
-    for ext in exts:
-        cand = img_dir / f"{stem}{ext}"
-        if cand.exists():
-            return cand
-    return None
-
-
-# ---------------------------------------------------------------------
-# Extract data
-# ---------------------------------------------------------------------
-def extract_data(
-    root_dir: str,
-    split: str,              
-    caption_name: str = "caption.txt",
-    img_subdir: str = "img",
-    convert_mode: str = "L",
-    lazy_load: bool = False
-) -> Data:
-    """
-    Read from:
-      root_dir/
-        split/
-          img/
-          caption.txt
-    caption.txt format: "<image_stem> token1 token2 ..."
-    Return: 
-      If lazy_load=False: [(img_name, Image, tokens)]
-      If lazy_load=True:  [(img_name, (w,h), tokens)]
-    """
-    split_dir = Path(root_dir) / split
-    cap_path = split_dir / caption_name
-    img_dir = split_dir / img_subdir
-
-    assert cap_path.exists(), f"Not found: {cap_path}"
-    assert img_dir.exists(), f"Not found: {img_dir}"
-
-    with cap_path.open("r", encoding="utf-8") as f:
-        captions = f.readlines()
-
-    data: Data = []
-    missing = 0
-
-    for line in captions:
-        parts = line.strip().split()
-        if len(parts) == 0:
-            continue
-        img_stem = parts[0]
-        tokens = parts[1:]
-
-        stem_no_ext = Path(img_stem).stem
-        img_path = _resolve_image_path(img_dir, stem_no_ext) or _resolve_image_path(img_dir, img_stem)
-        if img_path is None:
-            missing += 1
-            print(f"[WARN] Missing image for '{img_stem}' in {img_dir}")
-            continue
-
-        if lazy_load:
-            with Image.open(img_path) as im:
-                size = im.size
-            data.append((str(img_path), size, tokens))
-        else:
-            with Image.open(img_path) as im:
-                if convert_mode is not None:
-                    im = im.convert(convert_mode)
-                im = im.copy()
-            data.append((img_path.stem, im, tokens))
-
-    print(f"Extract data from dir: {split_dir}, size: {len(data)} (missing: {missing})")
-    return data
-
-
-# ---------------------------------------------------------------------
-# Dataset builders
-# ---------------------------------------------------------------------
 def build_validation_dataset(
     archive: str,
     folder: str,
-    batch_size: int,
-    batch_Imagesize: float,
-    maxlen: int,
-    maxImagesize: float,
     lazy_load: bool = False,
 ):
     if folder != "all":
@@ -181,33 +97,16 @@ def build_validation_dataset(
         for folder_name in ["2014", "2016", "2019"]:
             data += extract_data(root_dir=archive, split=folder_name, lazy_load=lazy_load)
 
-    return data_iterator(
-        data=data,
-        batch_size=batch_size,
-        batch_Imagesize=batch_Imagesize,
-        maxlen=maxlen,
-        maxImagesize=maxImagesize,
-    )
+    return data
 
 
 def build_train_dataset(
     archive: str,
     folder: str,
-    batch_size: int,
-    batch_Imagesize: float,
-    maxlen: int,
-    maxImagesize: float,
     lazy_load: bool = False,
 ):
     if folder == "train":
         data = extract_data(root_dir=archive, split=folder, lazy_load=lazy_load)
-        data = data_iterator(
-            data=data,
-            batch_size=batch_size,
-            batch_Imagesize=batch_Imagesize,
-            maxlen=maxlen,
-            maxImagesize=maxImagesize,
-        )
     return data
 
 
@@ -220,14 +119,34 @@ class Batch:
     imgs: FloatTensor  # [b, 1, H, W]
     mask: LongTensor  # [b, H, W]
     indices: List[List[int]]  # [b, l]
+    tgt: Optional[LongTensor] = None
+    out: Optional[LongTensor] = None
+    labels: Optional[LongTensor] = None
+    lengths: Optional[LongTensor] = None
 
     def __len__(self) -> int:
         return len(self.img_bases)
 
-    def to(self, device) -> "Batch":
+    def pin_memory(self):
         return Batch(
             img_bases=self.img_bases,
-            imgs=self.imgs.to(device),
-            mask=self.mask.to(device),
+            imgs=self.imgs.pin_memory(),
+            mask=self.mask.pin_memory(),
             indices=self.indices,
+            tgt=None if self.tgt is None else self.tgt.pin_memory(),
+            out=None if self.out is None else self.out.pin_memory(),
+            labels=None if self.labels is None else self.labels.pin_memory(),
+            lengths=None if self.lengths is None else self.lengths.pin_memory(),
+        )
+
+    def to(self, device, non_blocking=True) -> "Batch":
+        return Batch(
+            img_bases=self.img_bases,
+            imgs=self.imgs.to(device, non_blocking=non_blocking),
+            mask=self.mask.to(device, non_blocking=non_blocking),
+            indices=self.indices,
+            tgt=None if self.tgt is None else self.tgt.to(device, non_blocking=non_blocking),
+            out=None if self.out is None else self.out.to(device, non_blocking=non_blocking),
+            labels=None if self.labels is None else self.labels.to(device, non_blocking=non_blocking),
+            lengths=None if self.lengths is None else self.lengths.to(device, non_blocking=non_blocking),
         )

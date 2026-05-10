@@ -21,8 +21,7 @@ def train(config):
     from lit_comer import LitCoMER
     from utils.callbacks import (GradNormCallback)
     if config.trainer.resume_from_checkpoint is not None:
-        print("Resuming from checkpoint: ", config.trainer.resume_from_checkpoint)
-        model_module = LitCoMER.load_from_checkpoint(config.trainer.resume_from_checkpoint)
+        model_module = LitCoMER.load_from_checkpoint(config.trainer.resume_from_checkpoint, vocab_info=data_module.vocab.get_info())
     else:
         print("Training from new weights")
         model_module = LitCoMER(
@@ -32,11 +31,13 @@ def train(config):
             alpha = config.model.alpha,
             early_stopping = config.model.early_stopping,
             temperature = config.model.temperature,
+            vocab_info = data_module.vocab.get_info()
         )
 
    # Logger
     logger = Logger(config.wandb.name, project=config.wandb.project, config=dict(config), log_model=False)
-    logger.watch(model_module.comer_model, log="all", log_freq=100)
+    if config.wandb.get("wandb_watch", False):
+        logger.watch(model_module.comer_model, log=config.wandb.get("wandb_watch_log", "gradients"), log_freq=config.wandb.get("wandb_watch_log_freq", 1000))
 
    # Callback
     lr_callback = LearningRateMonitor(logging_interval=config.trainer.callbacks[0].init_args.logging_interval)
@@ -46,11 +47,12 @@ def train(config):
                                             mode        = config.trainer.callbacks[1].init_args.mode,
                                             filename    = config.trainer.callbacks[1].init_args.filename)
 
-    grad_norm_callback = GradNormCallback()
-    
-
     # Curriculum module
-    callback = [lr_callback, checkpoint_callback, grad_norm_callback]
+    callback = [lr_callback, checkpoint_callback]
+    
+    if config.trainer.get("log_grad_norm", False):
+        grad_norm_callback = GradNormCallback()
+        callback.append(grad_norm_callback)
     
     trainer = pl.Trainer(
         gpus                    = config.trainer.gpus,

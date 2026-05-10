@@ -15,10 +15,19 @@ class CROHMEDataset(Dataset):
                 w_hi: float,
                 h_lo: float,
                 h_hi: float,
-                lazy_load: bool = False) -> None:
+                lazy_load: bool = False,
+                cache_transforms: bool = False) -> None:
         super().__init__()
         self.dataset = dataset
         self.lazy_load = lazy_load
+        self.scale_aug = scale_aug
+        
+        # We only cache if scale_aug is disabled to avoid caching an augmented image forever
+        self.use_cache = cache_transforms and not scale_aug
+        if self.use_cache:
+            self.cache = {}
+        else:
+            self.cache = None
 
         trans_list = []
         if is_train and scale_aug:
@@ -36,25 +45,30 @@ class CROHMEDataset(Dataset):
         self.transform = tr.Compose(trans_list)
 
     def __getitem__(self, idx):
-        fnames, imgs, captions = self.dataset[idx]
+        if self.cache is not None and idx in self.cache:
+            return self.cache[idx]
+            
+        fname, im, caption = self.dataset[idx]
 
-        processed_imgs = []
         if self.lazy_load:
-            for p in fnames:
-                try:
-                    im = Image.open(p).convert("L")
-                    im_np = np.array(im)
-                    processed_imgs.append(self.transform(im_np))
-                except Exception as e:
-                    print(f"[WARN] Could not open image {p}: {e}")
-                    continue
-        else:
-            for im in imgs:
-                if not isinstance(im, np.ndarray):
-                    im = np.array(im)
-                processed_imgs.append(self.transform(im))
+            try:
+                im = Image.open(fname).convert("L")
+                im = np.array(im)
+            except Exception as e:
+                print(f"[WARN] Could not open image {fname}: {e}")
+                # Fallback to random noise to avoid crashing
+                im = np.random.randint(0, 255, (100, 100), dtype=np.uint8)
 
-        return fnames, processed_imgs, captions
+        if not isinstance(im, np.ndarray):
+            im = np.array(im)
+            
+        processed_img = self.transform(im)
+        res = (fname, processed_img, caption)
+        
+        if self.cache is not None:
+            self.cache[idx] = res
+
+        return res
 
     def __len__(self):
         return len(self.dataset)

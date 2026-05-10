@@ -1,4 +1,13 @@
-from typing import Dict, List
+from typing import Dict, List, Any
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class VocabInfo:
+    vocab_size: int
+    sos_id: int
+    eos_id: int
+    pad_id: int
+    words: Any
 
 
 class Vocab:
@@ -41,3 +50,12 @@ class Vocab:
 
     def __len__(self):
         return len(self.word2idx)
+
+    def get_info(self) -> VocabInfo:
+        return VocabInfo(
+            vocab_size=len(self),
+            sos_id=self.SOS_IDX,
+            eos_id=self.EOS_IDX,
+            pad_id=self.PAD_IDX,
+            words=self,
+        )

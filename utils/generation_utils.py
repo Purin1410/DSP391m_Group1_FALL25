@@ -4,15 +4,10 @@ from typing import List, Tuple
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
-from datamodule.datamodule import CROHMEDatamodule
-vocab = CROHMEDatamodule.shared_vocab
-vocab_size = len(vocab)
-
 from .utils import Hypothesis, ce_loss, to_tgt_output
 from einops import rearrange
 from einops.einops import repeat
 from torch import FloatTensor, LongTensor
-from .beam_search import BeamSearchScorer
 
 
 # modified from
@@ -80,30 +75,26 @@ class DecodeModel(pl.LightningModule):
 
         l2r = torch.full(
             (batch_size // 2, 1),
-            fill_value=vocab.SOS_IDX,
+            fill_value=self.vocab_info.sos_id,
             dtype=torch.long,
             device=self.device,
         )
         r2l = torch.full(
             (batch_size // 2, 1),
-            fill_value=vocab.EOS_IDX,
+            fill_value=self.vocab_info.eos_id,
             dtype=torch.long,
             device=self.device,
         )
         input_ids = torch.cat((l2r, r2l), dim=0)
-
-        beam_scorer = BeamSearchScorer(
-            batch_size, beam_size, alpha, early_stopping, self.device
-        )
 
         # first beam search
         hyps, scores = self._beam_search(
             src=src,
             src_mask=src_mask,
             input_ids=input_ids,
-            beam_scorer=beam_scorer,
             beam_size=beam_size,
             max_len=max_len,
+            alpha=alpha,
             temperature=temperature,
         )
 
@@ -113,10 +104,10 @@ class DecodeModel(pl.LightningModule):
 
         lens = [len(h) + 1 for h in hyps]  # plus to append start token
         r2l_tgt, r2l_out = to_tgt_output(
-            hyps[:half_bb_size], "r2l", self.device, pad_to_len=max(lens)
+            hyps[:half_bb_size], "r2l", self.device, self.vocab_info.sos_id, self.vocab_info.eos_id, self.vocab_info.pad_id, pad_to_len=max(lens)
         )
         l2r_tgt, l2r_out = to_tgt_output(
-            hyps[half_bb_size:], "l2r", self.device, pad_to_len=max(lens)
+            hyps[half_bb_size:], "l2r", self.device, self.vocab_info.sos_id, self.vocab_info.eos_id, self.vocab_info.pad_id, pad_to_len=max(lens)
         )
         tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
         out = torch.cat((l2r_out, r2l_out), dim=0)
@@ -144,9 +135,12 @@ class DecodeModel(pl.LightningModule):
             best_split * half_bb_size + batch_indices * beam_size + best_indices
         )
 
+        best_indices_cpu = best_indices.cpu().tolist()
+        best_scores_cpu = best_scores.cpu().tolist()
+
         ret: List[Hypothesis] = []
-        for idx, score in zip(best_indices, best_scores):
-            hpy = Hypothesis(hyps[idx], score, "l2r")
+        for idx, score in zip(best_indices_cpu, best_scores_cpu):
+            hpy = Hypothesis(hyps[idx].cpu(), score, "l2r")
             ret.append(hpy)
         return ret
 
@@ -155,80 +149,71 @@ class DecodeModel(pl.LightningModule):
         src: List[FloatTensor],
         src_mask: List[LongTensor],
         input_ids: LongTensor,
-        beam_scorer: BeamSearchScorer,
         beam_size: int,
         max_len: int,
+        alpha: float,
         temperature: float,
     ) -> Tuple[List[LongTensor], FloatTensor]:
-        """inner beam search
+        batch_size = input_ids.shape[0]
+        half = batch_size // 2
 
-        Parameters
-        ----------
-        src : List[FloatTensor]
-            [b, t, d]
-        src_mask : List[LongTensor]
-            [b, t]
-        input_ids: LongTensor
-            [b, 1]
-        beam_size : int
-        max_len : int
+        end_tokens = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+        end_tokens[:half] = self.vocab_info.eos_id
+        end_tokens[half:] = self.vocab_info.sos_id
 
-        Returns
-        _______
-        Tuple[List[LongTensor], FloatTensor]
-            List[LongTensor]: [b * beam_size] without SOS or EOS token
-            FloatTensor: [b * beam_size] corresponding scores
-        """
-        batch_size, cur_len = input_ids.shape
+        # Expand for beams
+        input_ids = input_ids.unsqueeze(1).expand(batch_size, beam_size).contiguous().view(-1, 1)
+        end_tokens = end_tokens.unsqueeze(1).expand(batch_size, beam_size).contiguous().view(-1)
 
-        beam_scores = torch.zeros(batch_size, dtype=torch.float, device=self.device)
+        beam_scores = torch.zeros((batch_size, beam_size), dtype=torch.float, device=self.device)
+        beam_scores[:, 1:] = -1e9
+        beam_scores = beam_scores.view(-1)
+        
+        done_mask = torch.zeros(batch_size * beam_size, dtype=torch.bool, device=self.device)
 
-        while cur_len < max_len and not beam_scorer.is_done():
-            next_token_logits = (
-                self.transform(src, src_mask, input_ids)[:, -1, :] / temperature
-            )
-            # [b *, l, v]
+        for step in range(max_len):
+            next_token_logits = self.transform(src, src_mask, input_ids)[:, -1, :] / temperature
             next_token_scores = F.log_softmax(next_token_logits, dim=-1)
+            
+            # Done beams can only generate PAD with 0 cost
+            next_token_scores[done_mask, :] = -1e9
+            next_token_scores[done_mask, self.vocab_info.pad_id] = 0.0
+            
+            next_scores = beam_scores.unsqueeze(-1) + next_token_scores
+            next_scores = next_scores.view(batch_size, beam_size * self.vocab_info.vocab_size)
+            
+            next_scores, next_tokens = torch.topk(next_scores, beam_size, dim=1)
+            
+            beam_indices = next_tokens // self.vocab_info.vocab_size
+            token_indices = next_tokens % self.vocab_info.vocab_size
+            
+            batch_indices = torch.arange(batch_size, device=self.device).unsqueeze(1).expand(-1, beam_size)
+            flat_indices = (batch_indices * beam_size + beam_indices).view(-1)
+            
+            input_ids = input_ids[flat_indices]
+            done_mask = done_mask[flat_indices]
+            beam_scores = next_scores.view(-1)
+            end_tokens_flat = end_tokens[flat_indices]
+            
+            token_indices = token_indices.view(-1, 1)
+            input_ids = torch.cat([input_ids, token_indices], dim=1)
+            
+            is_end_token = (token_indices.squeeze(-1) == end_tokens_flat)
+            done_mask = done_mask | is_end_token
 
-            next_token_scores = next_token_scores + beam_scores[:, None].expand_as(
-                next_token_scores
-            )
-            # [batch_size, beam_size * vocab_size]
-            reshape_size = next_token_scores.shape[0] // batch_size
-            next_token_scores = rearrange(
-                next_token_scores,
-                "(b m) v -> b (m v)",
-                m=reshape_size,
-            )
+            if done_mask.all():
+                break
 
-            # [b, 2 * beam_size]
-            next_token_scores, next_tokens = torch.topk(
-                next_token_scores, 2 * beam_size, dim=1
-            )
+        seq_lens = (input_ids != self.vocab_info.pad_id).sum(dim=1).float()
+        final_scores = beam_scores / (seq_lens ** alpha)
 
-            next_indices = next_tokens // vocab_size
-            next_tokens = next_tokens % vocab_size
-
-            if cur_len == 1:
-                input_ids = repeat(input_ids, "b l -> (b m) l", m=beam_size)
-                for i in range(len(src)):
-                    src[i] = repeat(src[i], "b ... -> (b m) ...", m=beam_size)
-                    src_mask[i] = repeat(src_mask[i], "b ... -> (b m) ...", m=beam_size)
-
-            beam_scores, beam_next_tokens, beam_idx = beam_scorer.process(
-                input_ids=input_ids,
-                next_scores=next_token_scores,
-                next_tokens=next_tokens,
-                next_indices=next_indices,
-            )
-
-            input_ids = torch.cat(
-                (input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)), dim=-1
-            )
-
-            cur_len += 1
-
-        return beam_scorer.finalize(input_ids, beam_scores)
+        all_hyps = []
+        for i in range(batch_size * beam_size):
+            seq = input_ids[i]
+            non_pad = seq[seq != self.vocab_info.pad_id]
+            all_hyps.append(non_pad[1:])
+            
+        return all_hyps, final_scores
 
     def _rate(
         self,
@@ -260,13 +245,29 @@ class DecodeModel(pl.LightningModule):
             [b * beam_size]
         """
         b = tgt.shape[0]
-        out_hat = self.transform(src, src_mask, tgt) / temperature
+        beam_size = b // src[0].shape[0]
+        chunk_size = beam_size * max(1, 32 // beam_size)
 
-        loss = ce_loss(out_hat, out, reduction="none")
-        loss = rearrange(loss, "(b l) -> b l", b=b)
+        losses = []
+        for i in range(0, b, chunk_size):
+            tgt_chunk = tgt[i : i + chunk_size]
+            out_chunk = out[i : i + chunk_size]
+            
+            src_start = i // beam_size
+            src_end = src_start + (tgt_chunk.shape[0] // beam_size)
+            
+            src_chunk = [s[src_start:src_end] for s in src]
+            src_mask_chunk = [sm[src_start:src_end] for sm in src_mask]
+            
+            out_hat = self.transform(src_chunk, src_mask_chunk, tgt_chunk) / temperature
+            
+            loss = ce_loss(out_hat, out_chunk, ignore_idx=self.vocab_info.pad_id, reduction="none")
+            loss = rearrange(loss, "(b l) -> b l", b=tgt_chunk.shape[0])
+            
+            mask = tgt_chunk == self.vocab_info.pad_id
+            penalty = (~mask).sum(dim=1) ** alpha
+            loss = -torch.sum(loss, dim=1) / penalty
+            
+            losses.append(loss)
 
-        mask = tgt == vocab.PAD_IDX
-        penalty = (~mask).sum(dim=1) ** alpha
-        loss = -torch.sum(loss, dim=1) / penalty
-
-        return loss
+        return torch.cat(losses, dim=0)

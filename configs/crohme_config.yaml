@@ -21,6 +21,7 @@ trainer:
   resume_from_checkpoint: null
   val_check_interval: 1.0
   default_root_dir: "checkpoints"
+  log_grad_norm: false
 
 model:
   d_model: 256
@@ -39,6 +40,7 @@ model:
   dc: 32
   cross_coverage: true
   self_coverage: true
+  arm_norm_impl: "legacy"
   # -------- beam search --------
   beam_size: 10
   max_len: 200
@@ -86,6 +88,7 @@ data:
   eval_batch_size: 512
   num_workers: 4
   scale_aug: false
+  cache_transforms: true
 
   # Augmentation params
   k_min: 0.7
@@ -96,11 +99,16 @@ data:
   w_hi: 1024
 
   # Memory control
-  gpu_max_memory: 128e4 
+  max_pixels_per_batch: 128e4 
   pin_memory: true
   persistent_workers: true
   lazy_load: false
+  pad_strategy: "bucket"
+  pad_to_multiple: 32
 
 wandb:
   name: "CoMER"
   project: "DSP391m_Group1_FALL25"
+  wandb_watch: false
+  wandb_watch_log: "gradients"
+  wandb_watch_log_freq: 1000

@@ -3,7 +3,8 @@ import pytorch_lightning as pl
 from .dataset import CROHMEDataset
 from torch.utils.data.dataloader import DataLoader
 from .utils import (build_train_dataset, 
-                    build_validation_dataset)
+                    build_validation_dataset,
+                    BucketedBatchSampler)
 from .vocab import Vocab
 from .utils import Batch
 import torch
@@ -23,7 +24,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         self.eval_batch_size            = data_config.eval_batch_size
         self.num_workers                = data_config.num_workers
         self.scale_aug                  = data_config.scale_aug
-        self.gpu_max_memory             = data_config.gpu_max_memory
+        self.max_pixels_per_batch       = data_config.get("max_pixels_per_batch", data_config.get("gpu_max_memory", 128e4))
         self.maxlen                     = self.config.model.max_len
         self.lazy_load                  = data_config.lazy_load
         self.k_min                      = data_config.k_min
@@ -41,20 +42,30 @@ class CROHMEDatamodule(pl.LightningDataModule):
         print(f"Load data from: {self.zipfile_path}")
     
     def collate_fn(self, batch):
-        assert len(batch) == 1
-        batch = batch[0]
-        fnames = batch[0]
-        images_x = batch[1]
-        seqs_y = [self.vocab.words2indices(x) for x in batch[2]]
+        fnames = [b[0] for b in batch]
+        images_x = [b[1] for b in batch]
+        seqs_y = [self.vocab.words2indices(b[2]) for b in batch]
         
-        # images_x = [torch.as_tensor(s, dtype=torch.float32).unsqueeze(0) if not torch.is_tensor(s) else s for s in images_x]
-
         heights_x = [s.size(1) for s in images_x]
         widths_x = [s.size(2) for s in images_x]
 
         n_samples = len(heights_x)
-        max_height_x = max(heights_x)
-        max_width_x = max(widths_x)
+        max_height_x = max(heights_x) if n_samples > 0 else 0
+        max_width_x = max(widths_x) if n_samples > 0 else 0
+        
+        pad_strategy = self.config.data.get("pad_strategy", "batch_max")
+        pad_to_multiple = self.config.data.get("pad_to_multiple", 32)
+        static_pad_height = self.config.data.get("static_pad_height", None)
+        static_pad_width = self.config.data.get("static_pad_width", None)
+
+        if pad_strategy == "bucket":
+            max_height_x = ((max_height_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
+            max_width_x = ((max_width_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
+        elif pad_strategy == "static":
+            if static_pad_height is not None:
+                max_height_x = max(max_height_x, static_pad_height)
+            if static_pad_width is not None:
+                max_width_x = max(max_width_x, static_pad_width)
 
         x = torch.zeros(n_samples, 1, max_height_x, max_width_x)
         x_mask = torch.ones(n_samples, max_height_x, max_width_x, dtype=torch.bool)
@@ -62,8 +73,18 @@ class CROHMEDatamodule(pl.LightningDataModule):
             x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
             x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
 
-        # return fnames, x, x_mask, seqs_y
-        return Batch(fnames, x, x_mask, seqs_y)
+        from utils.utils import to_bi_tgt_out
+        
+        lengths_x = [len(s) for s in seqs_y]
+        max_len = max(lengths_x) if len(lengths_x) > 0 else 0
+        labels = torch.full((n_samples, max_len), fill_value=self.vocab.PAD_IDX, dtype=torch.long)
+        for i, s in enumerate(seqs_y):
+            labels[i, :lengths_x[i]] = torch.tensor(s, dtype=torch.long)
+        lengths = torch.tensor(lengths_x, dtype=torch.long)
+        
+        tgt, out = to_bi_tgt_out(seqs_y, torch.device('cpu'))
+
+        return Batch(img_bases=fnames, imgs=x, mask=x_mask, indices=seqs_y, tgt=tgt, out=out, labels=labels, lengths=lengths)
 
         
 
@@ -89,6 +110,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                 h_lo        = self.config.data.h_lo,
                 h_hi        = self.config.data.h_hi,
                 lazy_load   = self.lazy_load,
+                cache_transforms = self.config.data.get("cache_transforms", True),
             )
             # Val_dataset
             self.val_dataset = CROHMEDataset(
@@ -109,6 +131,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
                 h_lo        = self.config.data.h_lo,
                 h_hi        = self.config.data.h_hi,
                 lazy_load   = self.lazy_load,
+                cache_transforms = self.config.data.get("cache_transforms", True),
             )
         if stage == "test" or stage is None:
             self.test_dataset = CROHMEDataset(
@@ -129,34 +152,71 @@ class CROHMEDatamodule(pl.LightningDataModule):
                 h_lo        = self.config.data.h_lo,
                 h_hi        = self.config.data.h_hi,
                 lazy_load   = self.lazy_load,
+                cache_transforms = self.config.data.get("cache_transforms", True),
             )
 
+    def _get_worker_init_fn(self):
+        def worker_init_fn(worker_id):
+            try:
+                import cv2
+                cv2.setNumThreads(self.config.data.get("opencv_num_threads_per_worker", 0))
+            except Exception:
+                pass
+        return worker_init_fn
+
     def train_dataloader(self):
+        batch_sampler = BucketedBatchSampler(
+            data=self.train_dataset.dataset,
+            max_pixels_per_batch=self.max_pixels_per_batch,
+            max_batch_size=self.train_batch_size,
+            shuffle=True,
+            maxlen=self.maxlen,
+            max_image_size=self.max_pixels_per_batch
+        )
         return DataLoader(
             dataset             = self.train_dataset,
-            shuffle             = True,
+            batch_sampler       = batch_sampler,
             num_workers         = self.num_workers,
             collate_fn          = self.collate_fn,
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
+            worker_init_fn      = self._get_worker_init_fn(),
         )
 
     def val_dataloader(self):
+        batch_sampler = BucketedBatchSampler(
+            data=self.val_dataset.dataset,
+            max_pixels_per_batch=self.max_pixels_per_batch,
+            max_batch_size=self.eval_batch_size,
+            shuffle=False,
+            maxlen=self.maxlen,
+            max_image_size=self.max_pixels_per_batch
+        )
         return DataLoader(
             dataset             = self.val_dataset,
-            shuffle             = False,
+            batch_sampler       = batch_sampler,
             num_workers         = self.num_workers,
             collate_fn          = self.collate_fn,
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
+            worker_init_fn      = self._get_worker_init_fn(),
         )
 
     def test_dataloader(self):
+        batch_sampler = BucketedBatchSampler(
+            data=self.test_dataset.dataset,
+            max_pixels_per_batch=self.max_pixels_per_batch,
+            max_batch_size=self.eval_batch_size,
+            shuffle=False,
+            maxlen=self.maxlen,
+            max_image_size=self.max_pixels_per_batch
+        )
         return DataLoader(
             dataset             = self.test_dataset,
-            shuffle             = False,
+            batch_sampler       = batch_sampler,
             num_workers         = self.num_workers,
             collate_fn          = self.collate_fn,
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
+            worker_init_fn      = self._get_worker_init_fn(),
         )
