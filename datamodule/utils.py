@@ -33,6 +33,7 @@ class BucketedBatchSampler(Sampler):
         self.max_pixels_per_batch = max_pixels_per_batch
         self.max_batch_size = max_batch_size
 
+        # thêm 2 dòng này để tương thích hơn với BatchSampler interface
         self.batch_size = max_batch_size
         self.drop_last = drop_last
 
@@ -76,6 +77,55 @@ class BucketedBatchSampler(Sampler):
         if self.drop_last:
             return len(self.batches) // world_size
         return math.ceil(len(self.batches) / world_size)
+
+    def _build_batches(self):
+        # Create list of indices
+        indices = list(range(len(self.data)))
+        
+        # Function to get area
+        def get_area(idx):
+            fea = self.data[idx][1]
+            if hasattr(fea, "size"):
+                return fea.size[0] * fea.size[1]
+            return fea[0] * fea[1]
+            
+        # Filter indices by maxlen and max_image_size
+        valid_indices = []
+        for idx in indices:
+            _, fea, lab = self.data[idx]
+            size = get_area(idx)
+            if len(lab) > self.maxlen:
+                continue
+            if size > self.max_image_size:
+                continue
+            valid_indices.append(idx)
+            
+        valid_indices.sort(key=get_area)
+        
+        batches = []
+        current_batch = []
+        biggest_image_size = 0
+        
+        for idx in valid_indices:
+            size = get_area(idx)
+            if size > biggest_image_size:
+                biggest_image_size = size
+            
+            batch_image_size = biggest_image_size * (len(current_batch) + 1)
+            
+            if batch_image_size > self.max_pixels_per_batch or len(current_batch) == self.max_batch_size:
+                if len(current_batch) > 0:
+                    batches.append(current_batch)
+                current_batch = []
+                biggest_image_size = size
+                
+            current_batch.append(idx)
+            
+        if len(current_batch) > 0 and not self.drop_last:
+            batches.append(current_batch)
+            
+        print(f"total {len(batches)} batch data loaded")
+        return batches
 
 def _resolve_image_path(
     img_dir: Path,
