@@ -25,7 +25,6 @@ class BucketedBatchSampler(Sampler):
         self.drop_last = drop_last
         self.maxlen = maxlen
         self.max_image_size = max_image_size
-        self.batch_size = self.max_batch_size
         
         self.batches = self._build_batches()
 
