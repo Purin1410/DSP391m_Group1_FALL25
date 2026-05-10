@@ -177,3 +177,68 @@ def to_bi_tgt_out(
     out = torch.cat((l2r_out, r2l_out), dim=0)
 
     return tgt, out
+
+
+def to_bi_tgt_out_from_padded(
+    labels: LongTensor,
+    lengths: LongTensor,
+    sos_id: int,
+    eos_id: int,
+    pad_id: int,
+) -> Tuple[LongTensor, LongTensor]:
+    """Vectorized bidirectional target/output construction from padded labels.
+
+    Parameters
+    ----------
+    labels : LongTensor [B, L]
+        Padded label tensor (pad positions filled with pad_id).
+    lengths : LongTensor [B]
+        Actual label lengths (non-pad count per sample).
+    sos_id, eos_id, pad_id : int
+        Token ids.
+
+    Returns
+    -------
+    Tuple[LongTensor, LongTensor]
+        tgt: [2B, L+1], out: [2B, L+1]
+        First B rows are l2r, last B rows are r2l.
+    """
+    B, L = labels.shape
+    device = labels.device
+    out_len = L + 1  # space for start/stop token
+
+    # ---- l2r ----
+    l2r_tgt = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
+    l2r_out = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
+
+    l2r_tgt[:, 0] = sos_id
+    l2r_tgt[:, 1:L+1] = labels  # labels already padded with pad_id
+
+    l2r_out[:, :L] = labels
+    # Place EOS at position lengths[i] for each sample
+    l2r_out[torch.arange(B, device=device), lengths] = eos_id
+
+    # ---- r2l (reversed labels) ----
+    r2l_tgt = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
+    r2l_out = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
+
+    # Build reversed labels using gather with reversed valid indices
+    # For sample i with length L_i, we want labels[i, L_i-1], labels[i, L_i-2], ..., labels[i, 0]
+    positions = torch.arange(L, device=device).unsqueeze(0).expand(B, -1)  # [B, L]
+    # rev_positions[i, j] = lengths[i] - 1 - j  (clamped to 0 for pad positions)
+    rev_positions = (lengths.unsqueeze(1) - 1 - positions).clamp(min=0)  # [B, L]
+    reversed_labels = labels.gather(1, rev_positions)
+    # Mask out pad positions (where j >= lengths[i])
+    valid_mask = positions < lengths.unsqueeze(1)  # [B, L]
+    reversed_labels = reversed_labels.masked_fill(~valid_mask, pad_id)
+
+    r2l_tgt[:, 0] = eos_id
+    r2l_tgt[:, 1:L+1] = reversed_labels
+
+    r2l_out[:, :L] = reversed_labels
+    r2l_out[torch.arange(B, device=device), lengths] = sos_id
+
+    # ---- combine ----
+    tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
+    out = torch.cat((l2r_out, r2l_out), dim=0)
+    return tgt, out

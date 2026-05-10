@@ -80,18 +80,24 @@ class Decoder(DecodeModel):
         )
 
         self.proj = nn.Linear(d_model, vocab_info.vocab_size)
-        self._causal_mask_cache = None
+        # Causal mask cache: keyed by (device_type, device_index, dtype_str)
+        # so CPU->CUDA or dtype changes don't reuse a stale/wrong-device mask.
+        self._causal_mask_cache = {}
 
-    def _build_attention_mask(self, length):
-        if self._causal_mask_cache is not None and self._causal_mask_cache.size(0) >= length:
-            return self._causal_mask_cache[:length, :length]
+    def _build_attention_mask(self, length, device=None, dtype=torch.bool):
+        if device is None:
+            device = self.device
+        cache_key = (device.type, device.index, str(dtype))
+        cached = self._causal_mask_cache.get(cache_key)
+        if cached is not None and cached.size(0) >= length:
+            return cached[:length, :length]
 
-        # lazily create causal attention mask
+        # lazily create causal attention mask (upper triangular = True)
         mask = torch.full(
-            (length, length), fill_value=1, dtype=torch.bool, device=self.device
+            (length, length), fill_value=1, dtype=dtype, device=device
         )
         mask.triu_(1)  # zero out the lower diagonal
-        self._causal_mask_cache = mask
+        self._causal_mask_cache[cache_key] = mask
         return mask
 
     def forward(
@@ -148,14 +154,13 @@ class Decoder(DecodeModel):
         B_tgt = input_ids.shape[0]
         B_src = s.shape[0]
         if B_tgt > B_src:
+            # This path is used by _rate() which passes original-size src with
+            # beam-expanded tgt.  The main decode loop (B2) pre-expands src
+            # before the loop, so this branch is NOT hit per-token in _beam_search.
             assert B_tgt % B_src == 0
             m = B_tgt // B_src
-            # expand() creates a view without materialising a copy.
-            # .contiguous() is intentionally omitted here (Step 9):
-            # rearrange / downstream ops handle non-contiguous tensors fine.
-            # If a downstream op ever requires contiguous memory, isolate the
-            # copy there with a TODO comment rather than doing it unconditionally.
             s = s.unsqueeze(1).expand(-1, m, -1, -1, -1).reshape(B_tgt, s.shape[1], s.shape[2], s.shape[3])
             sm = sm.unsqueeze(1).expand(-1, m, -1, -1).reshape(B_tgt, sm.shape[1], sm.shape[2])
         word_out = self(s, sm, input_ids)
         return word_out
+

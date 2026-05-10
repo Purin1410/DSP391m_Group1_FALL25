@@ -55,9 +55,10 @@ class CROHMEDataset(Dataset):
                 im = Image.open(fname).convert("L")
                 im = np.array(im)
             except Exception as e:
-                print(f"[WARN] Could not open image {fname}: {e}")
-                # Fallback to random noise to avoid crashing
-                im = np.random.randint(0, 255, (100, 100), dtype=np.uint8)
+                raise RuntimeError(
+                    f"Could not open image {fname}: {e}. "
+                    "Fix or remove the broken record from the dataset."
+                ) from e
 
         if not isinstance(im, np.ndarray):
             im = np.array(im)

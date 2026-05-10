@@ -28,19 +28,26 @@ class BucketedBatchSampler(Sampler):
         drop_last: bool = False,
         maxlen: int = 200,
         max_image_size: int = 32e4,
+        seed: int = 42,
     ):
         self.data = data
         self.max_pixels_per_batch = max_pixels_per_batch
         self.max_batch_size = max_batch_size
 
-        # thêm 2 dòng này để tương thích hơn với BatchSampler interface
+        # BatchSampler interface compat
         self.batch_size = max_batch_size
         self.drop_last = drop_last
 
         self.shuffle = shuffle
         self.maxlen = maxlen
         self.max_image_size = max_image_size
+        self.seed = seed
+        self.epoch = 0
         self.batches = self._build_batches()
+
+    def set_epoch(self, epoch: int):
+        """Set epoch for deterministic shuffling across DDP ranks."""
+        self.epoch = epoch
 
     def _ddp_info(self):
         if dist.is_available() and dist.is_initialized():
@@ -51,7 +58,9 @@ class BucketedBatchSampler(Sampler):
         batches = list(self.batches)
 
         if self.shuffle:
-            random.shuffle(batches)
+            # Use local RNG seeded by (seed + epoch) for deterministic cross-rank ordering
+            rng = random.Random(self.seed + self.epoch)
+            rng.shuffle(batches)
 
         world_size, rank = self._ddp_info()
 
@@ -68,6 +77,7 @@ class BucketedBatchSampler(Sampler):
             batches = batches[rank::world_size]
 
         return iter(batches)
+
 
     def __len__(self):
         world_size, _ = self._ddp_info()

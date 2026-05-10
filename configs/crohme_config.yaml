@@ -99,7 +99,7 @@ data:
   w_hi: 1024
 
   # Memory control
-  max_pixels_per_batch: 128e4 
+  max_pixels_per_batch: 1280000
   pin_memory: true
   persistent_workers: true
   lazy_load: false

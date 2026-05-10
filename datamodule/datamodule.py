@@ -29,7 +29,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         self.eval_batch_size            = data_config.eval_batch_size
         self.num_workers                = data_config.num_workers
         self.scale_aug                  = data_config.scale_aug
-        self.max_pixels_per_batch       = data_config.get("max_pixels_per_batch", data_config.get("gpu_max_memory", 128e4))
+        self.max_pixels_per_batch       = int(data_config.get("max_pixels_per_batch", data_config.get("gpu_max_memory", 1280000)))
         self.maxlen                     = self.config.model.max_len
         self.lazy_load                  = data_config.lazy_load
         self.k_min                      = data_config.k_min
@@ -78,7 +78,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
             x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
 
-        from utils.utils import to_bi_tgt_out
+        from utils.utils import to_bi_tgt_out_from_padded
         
         lengths_x = [len(s) for s in seqs_y]
         max_len = max(lengths_x) if len(lengths_x) > 0 else 0
@@ -87,14 +87,13 @@ class CROHMEDatamodule(pl.LightningDataModule):
             labels[i, :lengths_x[i]] = torch.tensor(s, dtype=torch.long)
         lengths = torch.tensor(lengths_x, dtype=torch.long)
         
-        tgt, out = to_bi_tgt_out(
-            seqs_y,
-            torch.device('cpu'),
+        # Vectorized bidirectional tgt/out from padded labels (D1)
+        tgt, out = to_bi_tgt_out_from_padded(
+            labels, lengths,
             sos_id=self.vocab.SOS_IDX,
             eos_id=self.vocab.EOS_IDX,
             pad_id=self.vocab.PAD_IDX,
         )
-
 
         return Batch(img_bases=fnames, imgs=x, mask=x_mask, indices=seqs_y, tgt=tgt, out=out, labels=labels, lengths=lengths)
 
