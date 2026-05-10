@@ -69,7 +69,10 @@ class DecodeModel(pl.LightningModule):
         half_bb_size = batch_beam_size // 2
 
         for i in range(len(src)):
-            # [2 * b, t, d], [l2r l2r, r2l r2l]
+            # Bidirectional beam search: duplicate encoder features for l2r + r2l directions.
+            # This copy is done ONCE here, before the decode loop, not inside it.
+            # TODO: if memory is very tight, keep src as [B,...] and use batch-index
+            #       indirection inside the loop instead of materialising the copy.
             src[i] = torch.cat((src[i], src[i]), dim=0)
             src_mask[i] = torch.cat((src_mask[i], src_mask[i]), dim=0)
 
@@ -201,8 +204,14 @@ class DecodeModel(pl.LightningModule):
             is_end_token = (token_indices.squeeze(-1) == end_tokens_flat)
             done_mask = done_mask | is_end_token
 
-            if done_mask.all():
-                break
+            # NOTE: Early stopping via `done_mask.all()` is intentionally
+            # removed here.  When done_mask is a CUDA tensor, calling .all()
+            # forces a CPU-GPU sync on every decode step, which serialises the
+            # entire decode loop and is a major throughput bottleneck.
+            # Finished beams are handled purely through tensor masking above
+            # (scores set to -1e9 / pad forced to 0.0), so removing the early
+            # break does not change the final output \u2014 it only adds at most
+            # (max_len - actual_len) extra no-op steps per sequence.
 
         seq_lens = (input_ids != self.vocab_info.pad_id).sum(dim=1).float()
         final_scores = beam_scores / (seq_lens ** alpha)

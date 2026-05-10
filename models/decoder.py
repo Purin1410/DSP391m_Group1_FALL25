@@ -150,7 +150,12 @@ class Decoder(DecodeModel):
         if B_tgt > B_src:
             assert B_tgt % B_src == 0
             m = B_tgt // B_src
-            s = s.unsqueeze(1).expand(-1, m, -1, -1, -1).contiguous().view(B_tgt, s.shape[1], s.shape[2], s.shape[3])
-            sm = sm.unsqueeze(1).expand(-1, m, -1, -1).contiguous().view(B_tgt, sm.shape[1], sm.shape[2])
+            # expand() creates a view without materialising a copy.
+            # .contiguous() is intentionally omitted here (Step 9):
+            # rearrange / downstream ops handle non-contiguous tensors fine.
+            # If a downstream op ever requires contiguous memory, isolate the
+            # copy there with a TODO comment rather than doing it unconditionally.
+            s = s.unsqueeze(1).expand(-1, m, -1, -1, -1).reshape(B_tgt, s.shape[1], s.shape[2], s.shape[3])
+            sm = sm.unsqueeze(1).expand(-1, m, -1, -1).reshape(B_tgt, sm.shape[1], sm.shape[2])
         word_out = self(s, sm, input_ids)
         return word_out

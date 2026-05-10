@@ -39,6 +39,11 @@ class LitCoMER(pl.LightningModule):
         self.optimizer_use = self.optimizer_cfg.get("use", "SGD")
         self.exprate_recorder = ExpRateRecorder(vocab_info)
 
+        self.scheduler_cfg = mcfg.get("scheduler", {})
+        self.scheduler_use = self.scheduler_cfg.get("use", "ReduceLROnPlateau")
+        self.scheduler_interval = self.scheduler_cfg.get("interval", "epoch")
+        self.scheduler_monitor = self.scheduler_cfg.get("monitor", "val_ExpRate")
+
     def forward(
         self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor
     ) -> FloatTensor:

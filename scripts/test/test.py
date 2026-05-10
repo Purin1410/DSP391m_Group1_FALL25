@@ -1,10 +1,8 @@
 import argparse
-import os
 import zipfile
 
 import torch
-from pytorch_lightning import seed_everything
-from sconf import Config
+from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from datamodule import CROHMEDatamodule
@@ -12,16 +10,17 @@ from lit_comer import LitCoMER
 
 
 def main(config_path: str, ckp_path: str, output_zip: str = "result.zip"):
-    config = Config(config_path)
-    seed_everything(config.seed_everything, workers=True)
+    # Load config consistently with training
+    config = OmegaConf.load(config_path)
 
     dm = CROHMEDatamodule(config=config)
     dm.setup("test")
     test_dataloader = dm.test_dataloader()
 
+    # vocab_info is retrieved explicitly — no shared_vocab import side-effects
     vocab_info = dm.vocab.get_info()
 
-    model = LitCoMER.load_from_checkpoint(ckp_path, vocab_info=vocab_info)
+    model = LitCoMER.load_from_checkpoint(ckp_path, config=config, vocab_info=vocab_info)
     model.eval()
     model.cuda()
 
@@ -30,15 +29,15 @@ def main(config_path: str, ckp_path: str, output_zip: str = "result.zip"):
     with zipfile.ZipFile(output_zip, "w") as zip_f:
         with torch.inference_mode():
             for batch in tqdm(test_dataloader, desc="Testing"):
-                batch = batch.to("cuda")
-                
-                # Inference
+                batch = batch.to("cuda", non_blocking=True)
+
+                # Inference — no grad, no training state
                 hyps = model.approximate_joint_search(batch.imgs, batch.mask)
                 exprate_recorder([h.seq for h in hyps], batch.indices)
-                
+
                 img_bases = batch.img_bases
                 preds = [vocab_info.words.indices2label(h.seq) for h in hyps]
-                
+
                 # Write to zip incrementally
                 for img_base, pred in zip(img_bases, preds):
                     content = f"%{img_base}\n${pred}$".encode()
@@ -55,5 +54,5 @@ if __name__ == "__main__":
     parser.add_argument("--ckp", type=str, required=True, help="Path to checkpoint")
     parser.add_argument("--output", type=str, default="result.zip", help="Output zip file")
     args = parser.parse_args()
-    
+
     main(args.config, args.ckp, args.output)

@@ -151,7 +151,11 @@ def to_tgt_output(
 
 
 def to_bi_tgt_out(
-    tokens: List[List[int]], device: torch.device
+    tokens: List[List[int]], 
+    device: torch.device,
+    sos_id: int,
+    eos_id: int,
+    pad_id: int,
 ) -> Tuple[LongTensor, LongTensor]:
     """Generate bidirection tgt and out
 
@@ -166,8 +170,8 @@ def to_bi_tgt_out(
     Tuple[LongTensor, LongTensor]
         tgt, out: [2b, l], [2b, l]
     """
-    l2r_tgt, l2r_out = to_tgt_output(tokens, "l2r", device)
-    r2l_tgt, r2l_out = to_tgt_output(tokens, "r2l", device)
+    l2r_tgt, l2r_out = to_tgt_output(tokens, "l2r", device, sos_id, eos_id, pad_id)
+    r2l_tgt, r2l_out = to_tgt_output(tokens, "r2l", device, sos_id, eos_id, pad_id)
 
     tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
     out = torch.cat((l2r_out, r2l_out), dim=0)

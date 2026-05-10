@@ -85,6 +85,82 @@ class BucketedBatchSampler(Sampler):
     def __len__(self):
         return len(self.batches)
 
+def _resolve_image_path(
+    img_dir: Path,
+    stem: str,
+    exts: Sequence[str] = (".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
+) -> Optional[Path]:
+    p = img_dir / stem
+    if p.exists():
+        return p
+
+    for ext in exts:
+        cand = img_dir / f"{stem}{ext}"
+        if cand.exists():
+            return cand
+    return None
+
+def extract_data(
+    root_dir: str,
+    split: str,              
+    caption_name: str = "caption.txt",
+    img_subdir: str = "img",
+    convert_mode: str = "L",
+    lazy_load: bool = False
+) -> Data:
+    """
+    Read from:
+      root_dir/
+        split/
+          img/
+          caption.txt
+    caption.txt format: "<image_stem> token1 token2 ..."
+    Return: 
+      If lazy_load=False: [(img_name, Image, tokens)]
+      If lazy_load=True:  [(img_name, (w,h), tokens)]
+    """
+    split_dir = Path(root_dir) / split
+    cap_path = split_dir / caption_name
+    img_dir = split_dir / img_subdir
+
+    assert cap_path.exists(), f"Not found: {cap_path}"
+    assert img_dir.exists(), f"Not found: {img_dir}"
+
+    with cap_path.open("r", encoding="utf-8") as f:
+        captions = f.readlines()
+
+    data: Data = []
+    missing = 0
+
+    for line in captions:
+        parts = line.strip().split()
+        if len(parts) == 0:
+            continue
+        img_stem = parts[0]
+        tokens = parts[1:]
+
+        stem_no_ext = Path(img_stem).stem
+        img_path = _resolve_image_path(img_dir, stem_no_ext) or _resolve_image_path(img_dir, img_stem)
+        if img_path is None:
+            missing += 1
+            print(f"[WARN] Missing image for '{img_stem}' in {img_dir}")
+            continue
+
+        if lazy_load:
+            with Image.open(img_path) as im:
+                size = im.size
+            data.append((str(img_path), size, tokens))
+        else:
+            with Image.open(img_path) as im:
+                if convert_mode is not None:
+                    im = im.convert(convert_mode)
+                im = im.copy()
+            data.append((img_path.stem, im, tokens))
+
+    print(f"Extract data from dir: {split_dir}, size: {len(data)} (missing: {missing})")
+    return data
+
+
 def build_validation_dataset(
     archive: str,
     folder: str,

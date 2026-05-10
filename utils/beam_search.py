@@ -1,14 +1,25 @@
-from typing import List, Tuple
+# ============================================================
+# DEPRECATED — NOT USED BY THE OPTIMIZED GENERATION PATH
+# This file (BeamSearchScorer) is kept only for backward
+# compatibility. The active beam search lives in
+# utils/generation_utils.py (DecodeModel._beam_search).
+# Do NOT import this at the top of training or inference code.
+# ============================================================
+from typing import List, Optional, Tuple
 
 import torch
-from datamodule.datamodule import CROHMEDatamodule
 from torch import FloatTensor, LongTensor
-
-vocab = CROHMEDatamodule.shared_vocab
 
 # modified from
 # https://github.com/huggingface/transformers/blob/af6e01c5bc39467f1e3ce47a2135fb1777af1db2/src/transformers/generation_beam_search.py#L206
 class BeamSearchScorer:
+    """Legacy beam-search scorer.  NOT used by the current training pipeline.
+
+    Pass ``vocab`` explicitly rather than relying on a global class attribute.
+    All `.item()` / `.tolist()` calls inside this class are acceptable because
+    they live outside the hot generation loop used at training time.
+    """
+
     def __init__(
         self,
         batch_size: int,
@@ -16,11 +27,14 @@ class BeamSearchScorer:
         alpha: float,
         do_early_stopping: bool,
         device: torch.device,
+        vocab=None,  # pass explicitly; do NOT read CROHMEDatamodule.shared_vocab here
     ) -> None:
         self.batch_size = batch_size
         self.beam_size = beam_size
         self.alpha = alpha
         self.device = device
+        # vocab must be passed explicitly; do not rely on global shared_vocab
+        self.vocab = vocab
 
         self._beam_hyps = [
             BeamHypotheses(beam_size, alpha, do_early_stopping)
@@ -77,6 +91,7 @@ class BeamSearchScorer:
             device=self.device,
         )
 
+        vocab = self.vocab
         for batch_idx, beam_hyp in enumerate(self._beam_hyps):
             if self._done[batch_idx]:
                 assert len(beam_hyp) >= self.beam_size
@@ -95,6 +110,8 @@ class BeamSearchScorer:
                 )
             ):
                 batch_beam_idx = batch_idx * self.beam_size + next_index
+                # NOTE: .item() calls here are acceptable — this class is NOT on the
+                # hot training/inference path (see DEPRECATED notice at top of file).
                 l2r_done = (
                     input_ids[batch_beam_idx][0].item() == vocab.SOS_IDX
                     and next_token.item() == vocab.EOS_IDX

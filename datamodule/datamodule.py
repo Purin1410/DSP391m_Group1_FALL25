@@ -10,7 +10,12 @@ from .utils import Batch
 import torch
 
 class CROHMEDatamodule(pl.LightningDataModule):
+    # shared_vocab is a class-level cache kept for backward compatibility.
+    # It lives ONLY inside the datamodule; no utility or model module should
+    # import or read it at import time.  Token IDs used by generation must be
+    # passed explicitly via VocabInfo (see datamodule.vocab.VocabInfo).
     shared_vocab: Optional[Vocab] = None  # class-level cache
+
     def __init__(
         self,
         config,
@@ -82,7 +87,14 @@ class CROHMEDatamodule(pl.LightningDataModule):
             labels[i, :lengths_x[i]] = torch.tensor(s, dtype=torch.long)
         lengths = torch.tensor(lengths_x, dtype=torch.long)
         
-        tgt, out = to_bi_tgt_out(seqs_y, torch.device('cpu'))
+        tgt, out = to_bi_tgt_out(
+            seqs_y,
+            torch.device('cpu'),
+            sos_id=self.vocab.SOS_IDX,
+            eos_id=self.vocab.EOS_IDX,
+            pad_id=self.vocab.PAD_IDX,
+        )
+
 
         return Batch(img_bases=fnames, imgs=x, mask=x_mask, indices=seqs_y, tgt=tgt, out=out, labels=labels, lengths=lengths)
 
@@ -93,14 +105,11 @@ class CROHMEDatamodule(pl.LightningDataModule):
         if stage == "fit" or stage is None:
             # Train_dataset
             self.train_dataset = CROHMEDataset(
-                dataset = build_train_dataset(archive       = self.zipfile_path, 
-                                            folder          = 'train', 
-                                            batch_size      = self.train_batch_size,
-                                            batch_Imagesize = self.gpu_max_memory,
-                                            maxlen          = self.maxlen, 
-                                            maxImagesize    = self.gpu_max_memory,
-                                            lazy_load       = self.lazy_load,
-                                            ),
+                dataset = build_train_dataset(
+                            archive=self.zipfile_path,
+                            folder="train",
+                            lazy_load=self.lazy_load,
+                        ),
                 is_train    = True,
                 scale_aug   = self.scale_aug,
                 k_min       = self.config.data.k_min,
@@ -114,14 +123,11 @@ class CROHMEDatamodule(pl.LightningDataModule):
             )
             # Val_dataset
             self.val_dataset = CROHMEDataset(
-                dataset = build_validation_dataset(archive  = self.zipfile_path, 
-                                            folder          = self.test_year, 
-                                            batch_size      = self.eval_batch_size,
-                                            batch_Imagesize = self.gpu_max_memory,
-                                            maxlen          = self.maxlen, 
-                                            maxImagesize    = self.gpu_max_memory,
-                                            lazy_load     = self.lazy_load,
-                                            ),
+                dataset = build_validation_dataset(
+                    archive=self.zipfile_path,
+                    folder=self.test_year,
+                    lazy_load=self.lazy_load,
+                ),
                 is_train    = False,
                 scale_aug   = self.scale_aug,
                 k_min       = self.config.data.k_min,
@@ -135,13 +141,10 @@ class CROHMEDatamodule(pl.LightningDataModule):
             )
         if stage == "test" or stage is None:
             self.test_dataset = CROHMEDataset(
-                dataset = build_validation_dataset(archive  = self.zipfile_path, 
-                                            folder          = self.test_year, 
-                                            batch_size      = self.eval_batch_size,
-                                            batch_Imagesize = self.gpu_max_memory,
-                                            maxlen          = self.maxlen, 
-                                            maxImagesize    = self.gpu_max_memory,
-                                            lazy_load     = self.lazy_load,
+                dataset = build_validation_dataset(
+                    archive=self.zipfile_path, 
+                    folder=self.test_year, 
+                    lazy_load=self.lazy_load,
                                             ),
                 is_train    = False,
                 scale_aug   = self.scale_aug,
