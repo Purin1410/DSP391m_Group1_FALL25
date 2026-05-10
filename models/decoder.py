@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -145,6 +145,95 @@ class Decoder(DecodeModel):
         out = self.proj(out)
 
         return out
+
+    def init_decode_cache(
+        self, batch_beam_size: int, src: FloatTensor, src_mask: LongTensor
+    ) -> dict:
+        """
+        src: [B, H, W, D]
+        src_mask: [B, H, W]
+        """
+        B, h, w, d = src.shape
+        assert batch_beam_size % B == 0
+        beam_size = batch_beam_size // B
+        
+        src_flat = rearrange(src, "b h w d -> (h w) b d")
+        src_mask_flat = rearrange(src_mask, "b h w -> b (h w)")
+        
+        cross_kv = []
+        for mod in self.model.layers:
+            cross_k, cross_v = mod.multihead_attn.project_kv(src_flat, src_flat)
+            # shape: [B * nhead, src_len, head_dim]
+            cross_kv.append({"k": cross_k, "v": cross_v})
+            
+        cache = {
+            "layers": [
+                {"self_k": None, "self_v": None}
+                for _ in range(self.model.num_layers)
+            ],
+            "cross_kv": cross_kv,
+            "memory_key_padding_mask": src_mask_flat,
+            "height": h,
+            "beam_origin": torch.arange(B, device=src.device).repeat_interleave(beam_size),
+        }
+        
+        if self.model.arm is not None:
+            cache["arm"] = {
+                "final_attn_cumsum": [
+                    torch.zeros((batch_beam_size, self.model.arm.nhead, h * w), device=src.device, dtype=src.dtype)
+                    for _ in range(self.model.num_layers)
+                ],
+                "first_pass_cumsum": [
+                    torch.zeros((batch_beam_size, self.model.arm.nhead, h * w), device=src.device, dtype=src.dtype)
+                    for _ in range(self.model.num_layers)
+                ],
+            }
+            
+        return cache
+
+    def reorder_decode_cache(self, cache: dict, new_order: LongTensor) -> dict:
+        B_beam = new_order.size(0)
+        nhead = cache["cross_kv"][0]["k"].size(0) // cache["memory_key_padding_mask"].size(0)
+        
+        new_order_expanded = new_order.unsqueeze(1) * nhead + torch.arange(nhead, device=new_order.device).unsqueeze(0)
+        new_order_expanded = new_order_expanded.view(-1)
+        
+        for i in range(self.model.num_layers):
+            if cache["layers"][i]["self_k"] is not None:
+                cache["layers"][i]["self_k"] = cache["layers"][i]["self_k"][new_order_expanded]
+                cache["layers"][i]["self_v"] = cache["layers"][i]["self_v"][new_order_expanded]
+                
+            if "arm" in cache:
+                cache["arm"]["final_attn_cumsum"][i] = cache["arm"]["final_attn_cumsum"][i][new_order]
+                cache["arm"]["first_pass_cumsum"][i] = cache["arm"]["first_pass_cumsum"][i][new_order]
+                
+        cache["beam_origin"] = cache["beam_origin"][new_order]
+        return cache
+
+    def decode_step(self, last_tokens: LongTensor, cache: dict, step: int, input_ids: Optional[LongTensor] = None) -> Tuple[FloatTensor, dict]:
+        """
+        last_tokens: [B_beam, 1]
+        """
+        tgt = self.word_embed(last_tokens) # [B_beam, 1, D]
+        
+        emb = self.pos_enc.pe[step:step+1, :]
+        tgt = tgt + emb[None, :, :]
+        tgt = self.norm(tgt)
+        
+        tgt = rearrange(tgt, "b l d -> l b d") # [1, B_beam, D]
+        
+        out, cache = self.model.forward_step(
+            tgt=tgt,
+            cache=cache,
+            beam_origin=cache["beam_origin"],
+            memory_key_padding_mask=cache["memory_key_padding_mask"],
+            height=cache["height"]
+        )
+        
+        out = rearrange(out, "l b d -> b l d") # [B_beam, 1, D]
+        out = self.proj(out) # [B_beam, 1, vocab_size]
+        
+        return out.squeeze(1), cache
 
     def transform(
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor

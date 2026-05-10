@@ -131,3 +131,37 @@ class AttentionRefinementModule(nn.Module):
 
         cov = rearrange(cov, "(b t) n h w -> (b n) t (h w)", t=t)
         return cov
+
+    def forward_step(
+        self,
+        prev_attn_cumsum: Tensor,
+        self_attn_cumsum: Tensor,
+        curr_first_pass_attn: Tensor,
+        key_padding_mask: Tensor,
+        h: int,
+    ) -> Tensor:
+        t = 1
+        mask = repeat(key_padding_mask, "b (h w) -> (b t) () h w", h=h, t=t).bool()
+
+        prev_attn = rearrange(prev_attn_cumsum, "(b n) l -> b n 1 l", n=self.nhead)
+        curr_attn = rearrange(self_attn_cumsum, "(b n) l -> b n 1 l", n=self.nhead)
+
+        attns = []
+        if self.cross_coverage:
+            attns.append(prev_attn)
+        if self.self_coverage:
+            attns.append(curr_attn)
+        attns = torch.cat(attns, dim=1)
+
+        attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h)
+
+        cov = self.conv(attns)
+        cov = self.act(cov)
+
+        cov = cov.masked_fill(mask, 0.0)
+        cov = self.proj(cov)
+
+        cov = self.post_norm(cov, mask)
+
+        cov = rearrange(cov, "(b t) n h w -> (b n) t (h w)", t=t)
+        return cov

@@ -14,7 +14,7 @@ from torch import FloatTensor, LongTensor
 # https://github.com/huggingface/transformers/blob/af6e01c5bc39467f1e3ce47a2135fb1777af1db2/src/transformers/generation_utils.py#L1843
 
 
-def _strip_generated_boundaries(
+def _strip_generated_boundaries_cpu(
     seq: torch.Tensor,
     sos_id: int,
     eos_id: int,
@@ -32,7 +32,7 @@ def _strip_generated_boundaries(
     Parameters
     ----------
     seq : torch.Tensor
-        1-D tensor of token ids (no PAD, already filtered).
+        1-D tensor of token ids (no PAD, already filtered). Must be on CPU.
     sos_id : int
     eos_id : int
 
@@ -41,6 +41,7 @@ def _strip_generated_boundaries(
     torch.Tensor
         Cleaned 1-D tensor comparable to ground-truth label indices.
     """
+    assert seq.device.type == "cpu", "Boundary stripping must run on CPU tensors only"
     if seq.numel() == 0:
         return seq
 
@@ -57,6 +58,7 @@ def _strip_generated_boundaries(
         end -= 1
 
     return seq[start:end]
+
 
 
 class DecodeModel(pl.LightningModule):
@@ -82,58 +84,29 @@ class DecodeModel(pl.LightningModule):
         """
         raise NotImplementedError("This is an abstract method.")
 
+    def init_decode_cache(
+        self, batch_beam_size: int, src: FloatTensor, src_mask: LongTensor
+    ) -> dict:
+        """Initialize KV-cache for Stage 2. Stage 1 base class returns fallback cache."""
+        return {"src": [src], "src_mask": [src_mask]}
+
+    def reorder_decode_cache(self, cache: dict, new_order: LongTensor) -> dict:
+        """Reorder KV-cache after beam selection."""
+        if "src" in cache:
+            cache["src"] = [s_elem[new_order] for s_elem in cache["src"]]
+            cache["src_mask"] = [sm_elem[new_order] for sm_elem in cache["src_mask"]]
+        return cache
+
     def decode_step(
         self,
-        src: List[FloatTensor],
-        src_mask: List[LongTensor],
+        last_tokens: LongTensor,
+        cache: dict,
+        step: int,
         input_ids: LongTensor,
-        cache: Optional[Dict] = None,
-        step: int = 0,
-    ) -> Tuple[FloatTensor, Optional[Dict]]:
-        """Incremental decode interface — Stage 1 (full-prefix fallback).
-
-        This method produces the same next-token logits as
-        ``self.transform(src, src_mask, input_ids)[:, -1, :]``
-        but exposes a ``cache`` argument for future KV-cache integration.
-
-        Stage 1 (current):
-            Falls back to full-prefix decoding.  ``cache`` is accepted
-            but not used internally.
-
-        Stage 2 (TODO — KV-cache):
-            Cache per-layer self-attention K/V projections in ``cache``.
-            Reorder cache after beam selection.
-            Reuse encoder cross-attention projections.
-            Only run the last token through each decoder layer.
-
-        Parameters
-        ----------
-        src : List[FloatTensor]
-            Encoder features (possibly beam-expanded).
-        src_mask : List[LongTensor]
-            Encoder masks (possibly beam-expanded).
-        input_ids : LongTensor
-            [B, L] full prefix including all previous tokens.
-        cache : Optional[Dict]
-            KV-cache dict.  Stage 1 ignores this.
-        step : int
-            Current decode step (0-indexed).
-
-        Returns
-        -------
-        Tuple[FloatTensor, Optional[Dict]]
-            - next_token_logits: [B, vocab_size]
-            - updated cache (None in Stage 1)
-        """
-        # Stage 1: full-prefix fallback.
-        # TODO Stage 2: implement per-layer K/V caching here.
-        #   - In each TransformerDecoderLayer, cache the self-attention
-        #     K and V tensors (shape [B*nhead, L, head_dim]) in
-        #     cache["layer_{i}_self_k"], cache["layer_{i}_self_v"].
-        #   - On step > 0, run only the last token through embedding,
-        #     concatenate with cached K/V, and update cache.
-        #   - Cross-attention K/V from encoder can also be cached since
-        #     encoder features do not change across decode steps.
+    ) -> Tuple[FloatTensor, dict]:
+        """Incremental decode interface — Stage 1 (full-prefix fallback)."""
+        src = cache.get("src", [])
+        src_mask = cache.get("src_mask", [])
         logits = self.transform(src, src_mask, input_ids)[:, -1, :]
         return logits, cache
 
@@ -269,26 +242,32 @@ class DecodeModel(pl.LightningModule):
         input_ids = input_ids.repeat_interleave(beam_size, dim=0)  # [batch_size * beam_size, seq_len]
         end_tokens = end_tokens.repeat_interleave(beam_size)       # [batch_size * beam_size]
 
-        # ----- B2: Beam-expand encoder features ONCE, before the decode loop -----
-        # This ensures transform() is never called with B_tgt > B_src inside
-        # the per-token loop, avoiding repeated expand/reshape of encoder features.
-        beam_src = []
-        beam_src_mask = []
-        for s in src:
-            beam_src.append(
-                s.unsqueeze(1)
-                .expand(-1, beam_size, *( [-1] * (s.dim() - 1) ))
-                .reshape(batch_size * beam_size, *s.shape[1:])
-            )
-        for sm in src_mask:
-            beam_src_mask.append(
-                sm.unsqueeze(1)
-                .expand(-1, beam_size, *( [-1] * (sm.dim() - 1) ))
-                .reshape(batch_size * beam_size, *sm.shape[1:])
-            )
-        # Encoder features are now [batch_size * beam_size, ...].
-        # Memory cost: one copy (reshape may copy if expand produced stride-0 dim).
-        # This copy is NOT repeated every decode step.
+        assert len(src) == 1 and len(src_mask) == 1
+        
+        # In Stage 1 fallback, this caches [B, H, W, D].
+        # The reorder cache handles fallback expansion dynamically.
+        # Wait, the fallback needs [batch_size * beam_size] expansion!
+        # If the fallback gets [B], it won't work because input_ids are [B*beam].
+        # Let's expand src ONCE for the fallback just in case.
+        # But wait! If we do `self.init_decode_cache(batch_size * beam_size, src[0], src_mask[0])`,
+        # and the fallback `init_decode_cache` just returns `[src]`, the shapes mismatch.
+        # We should ensure the fallback works exactly as before.
+        # Actually, let's just do:
+        B_tgt = batch_size * beam_size
+        s = src[0].unsqueeze(1).expand(-1, beam_size, *( [-1] * (src[0].dim() - 1) )).reshape(B_tgt, *src[0].shape[1:])
+        sm = src_mask[0].unsqueeze(1).expand(-1, beam_size, *( [-1] * (src_mask[0].dim() - 1) )).reshape(B_tgt, *src_mask[0].shape[1:])
+        
+        # But wait, we MUST not copy encoder features per step!
+        # `Decoder.init_decode_cache` will ignore `src` if it wants to, or use it.
+        # Wait, Decoder expects original `[B, H, W, D]` and `batch_beam_size`.
+        # So we should pass `src[0]` NOT expanded to `init_decode_cache`!
+        # And we can just pass `s` to the fallback.
+        cache = self.init_decode_cache(B_tgt, src[0], src_mask[0])
+        
+        # For base class fallback, if it returned `[src[0]]` without expanding, we override it here.
+        if "src" in cache and cache["src"][0].shape[0] != B_tgt:
+            cache["src"] = [s]
+            cache["src_mask"] = [sm]
 
         beam_scores = torch.zeros((batch_size, beam_size), dtype=torch.float, device=self.device)
         beam_scores[:, 1:] = -1e9
@@ -296,14 +275,10 @@ class DecodeModel(pl.LightningModule):
 
         done_mask = torch.zeros(batch_size * beam_size, dtype=torch.bool, device=self.device)
 
-        # KV-cache placeholder (Stage 1: unused, passed through for interface compat)
-        cache: Optional[Dict] = None
+        last_tokens = input_ids  # [B*beam, 1]
 
         for step in range(max_len):
-            # decode_step uses full-prefix in Stage 1; ready for KV-cache in Stage 2
-            next_token_logits, cache = self.decode_step(
-                beam_src, beam_src_mask, input_ids, cache=cache, step=step
-            )
+            next_token_logits, cache = self.decode_step(last_tokens, cache, step, input_ids)
             next_token_logits = next_token_logits / temperature
             next_token_scores = F.log_softmax(next_token_logits, dim=-1)
 
@@ -327,22 +302,14 @@ class DecodeModel(pl.LightningModule):
             end_tokens = end_tokens[flat_indices]
             beam_scores = next_scores.view(-1)
 
-            # Reorder beam-expanded encoder features after beam selection
-            beam_src = [s[flat_indices] for s in beam_src]
-            beam_src_mask = [sm[flat_indices] for sm in beam_src_mask]
+            cache = self.reorder_decode_cache(cache, flat_indices)
 
             token_indices = token_indices.view(-1, 1)
             input_ids = torch.cat([input_ids, token_indices], dim=1)
+            last_tokens = token_indices
 
             is_end_token = token_indices.squeeze(-1) == end_tokens
             done_mask = done_mask | is_end_token
-
-            # NOTE: Early stopping via `done_mask.all()` is intentionally
-            # removed.  When done_mask is a CUDA tensor, calling .all()
-            # forces a CPU-GPU sync on every decode step, serialising
-            # the entire decode loop.  Finished beams are handled purely
-            # through tensor masking above (scores set to -1e9 / pad
-            # forced to 0.0).
 
         seq_lens = (input_ids != self.vocab_info.pad_id).sum(dim=1).float()
         final_scores = beam_scores / (seq_lens ** alpha)
@@ -352,14 +319,17 @@ class DecodeModel(pl.LightningModule):
         eos_id = self.vocab_info.eos_id
         pad_id = self.vocab_info.pad_id
 
+        input_ids_cpu = input_ids.detach().cpu()
+        final_scores_cpu = final_scores.detach().cpu()
+
         all_hyps = []
         for i in range(batch_size * beam_size):
-            seq = input_ids[i]
+            seq = input_ids_cpu[i]
             non_pad = seq[seq != pad_id]
-            stripped = _strip_generated_boundaries(non_pad, sos_id, eos_id)
+            stripped = _strip_generated_boundaries_cpu(non_pad, sos_id, eos_id)
             all_hyps.append(stripped)
 
-        return all_hyps, final_scores
+        return all_hyps, final_scores_cpu
 
     def _rate(
         self,

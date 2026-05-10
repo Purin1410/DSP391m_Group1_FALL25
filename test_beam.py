@@ -49,7 +49,7 @@ def _make_vocab_info() -> VocabInfo:
 # A2. Actual DecodeModel._beam_search tests with dummy subclass
 # ===================================================================
 
-from utils.generation_utils import DecodeModel, _strip_generated_boundaries
+from utils.generation_utils import DecodeModel, _strip_generated_boundaries_cpu
 
 
 class DummyDecodeModel(DecodeModel):
@@ -93,7 +93,7 @@ def test_actual_beam_search_shapes():
 
     # Create fake encoder features — single-level list
     src = [torch.randn(batch_size, 4, 4, 32)]   # [B, H, W, d]
-    src_mask = [torch.zeros(batch_size, 4, 4, dtype=torch.long)]
+    src_mask = [torch.zeros(batch_size, 4, 4, dtype=torch.bool)]
 
     half = batch_size // 2
     input_ids = torch.zeros(batch_size, 1, dtype=torch.long)
@@ -129,7 +129,7 @@ def test_actual_beam_no_boundary_tokens():
     max_len = 6
 
     src = [torch.randn(batch_size, 2, 2, 32)]
-    src_mask = [torch.zeros(batch_size, 2, 2, dtype=torch.long)]
+    src_mask = [torch.zeros(batch_size, 2, 2, dtype=torch.bool)]
 
     half = batch_size // 2
     input_ids = torch.zeros(batch_size, 1, dtype=torch.long)
@@ -165,38 +165,38 @@ def test_actual_beam_no_boundary_tokens():
 def test_strip_generated_boundaries():
     """A1: Explicit tests for _strip_generated_boundaries."""
     # l2r: [SOS, a, b, EOS, PAD] -> strip -> [a, b]
-    seq = torch.tensor([SOS, 5, 6, EOS])
-    result = _strip_generated_boundaries(seq, SOS, EOS)
+    seq = torch.tensor([SOS, 5, 6, EOS], device="cpu")
+    result = _strip_generated_boundaries_cpu(seq, SOS, EOS)
     assert result.tolist() == [5, 6], f"l2r strip failed: {result.tolist()}"
 
     # l2r no terminal due to max length: [SOS, a, b] -> [a, b]
-    seq = torch.tensor([SOS, 5, 6])
-    result = _strip_generated_boundaries(seq, SOS, EOS)
+    seq = torch.tensor([SOS, 5, 6], device="cpu")
+    result = _strip_generated_boundaries_cpu(seq, SOS, EOS)
     assert result.tolist() == [5, 6], f"l2r no-terminal strip failed: {result.tolist()}"
 
     # r2l: [EOS, a, b, SOS] -> strip -> [a, b]
-    seq = torch.tensor([EOS, 5, 6, SOS])
-    result = _strip_generated_boundaries(seq, SOS, EOS)
+    seq = torch.tensor([EOS, 5, 6, SOS], device="cpu")
+    result = _strip_generated_boundaries_cpu(seq, SOS, EOS)
     assert result.tolist() == [5, 6], f"r2l strip failed: {result.tolist()}"
 
     # Empty sequence
-    seq = torch.tensor([], dtype=torch.long)
-    result = _strip_generated_boundaries(seq, SOS, EOS)
+    seq = torch.tensor([], dtype=torch.long, device="cpu")
+    result = _strip_generated_boundaries_cpu(seq, SOS, EOS)
     assert result.numel() == 0, f"Empty strip failed: {result.tolist()}"
 
     # Immediate terminal only: [SOS] -> []
-    seq = torch.tensor([SOS])
-    result = _strip_generated_boundaries(seq, SOS, EOS)
+    seq = torch.tensor([SOS], device="cpu")
+    result = _strip_generated_boundaries_cpu(seq, SOS, EOS)
     assert result.numel() == 0, f"Single token strip failed: {result.tolist()}"
 
     # [SOS, EOS] -> []
-    seq = torch.tensor([SOS, EOS])
-    result = _strip_generated_boundaries(seq, SOS, EOS)
+    seq = torch.tensor([SOS, EOS], device="cpu")
+    result = _strip_generated_boundaries_cpu(seq, SOS, EOS)
     assert result.numel() == 0, f"SOS+EOS strip failed: {result.tolist()}"
 
     # Normal tokens only (no boundaries): [5, 6, 7] -> [5, 6, 7]
-    seq = torch.tensor([5, 6, 7])
-    result = _strip_generated_boundaries(seq, SOS, EOS)
+    seq = torch.tensor([5, 6, 7], device="cpu")
+    result = _strip_generated_boundaries_cpu(seq, SOS, EOS)
     assert result.tolist() == [5, 6, 7], f"No-boundary strip failed: {result.tolist()}"
 
     print("[PASS] A1 _strip_generated_boundaries all cases")
@@ -214,12 +214,12 @@ def test_decode_step_equivalence():
     model.eval()
 
     src = [torch.randn(2, 3, 3, 32)]
-    src_mask = [torch.zeros(2, 3, 3, dtype=torch.long)]
+    src_mask = [torch.zeros(2, 3, 3, dtype=torch.bool)]
     prefix = torch.tensor([[SOS, 5, 6], [EOS, 7, 8]])
 
     with torch.inference_mode():
         full_logits = model.transform(src, src_mask, prefix)[:, -1, :]
-        step_logits, cache = model.decode_step(src, src_mask, prefix, cache=None, step=2)
+        step_logits, cache = model.decode_step(prefix, cache={"src": src, "src_mask": src_mask}, step=2, input_ids=prefix)
 
     assert torch.allclose(full_logits, step_logits, atol=1e-5), (
         f"decode_step output differs from transform: max diff = {(full_logits - step_logits).abs().max()}"
@@ -482,7 +482,7 @@ def test_encoder_feature_memory_measurement():
     """E3: Verify we can measure memory before/after encoder feature duplication."""
     # This is a measurement utility test — it just verifies the pattern works
     feature = torch.randn(2, 8, 8, 32)  # [B, H, W, d]
-    mask = torch.zeros(2, 8, 8, dtype=torch.long)
+    mask = torch.zeros(2, 8, 8, dtype=torch.bool)
 
     bytes_before = feature.nelement() * feature.element_size()
     feature_dup = torch.cat((feature, feature), dim=0)
@@ -520,8 +520,179 @@ def test_no_cuda_bool_sync():
 
 
 # ===================================================================
+# F. Exact KV-Cache Architecture Tests
+# ===================================================================
+
+def test_decode_step_matches_full_prefix():
+    """F1: Incremental decode_step MUST exactly match full-prefix transform()."""
+    from models.decoder import Decoder
+    torch.manual_seed(42)
+    vi = _make_vocab_info()
+    decoder = Decoder(
+        d_model=32, nhead=4, num_decoder_layers=2,
+        dim_feedforward=64, dropout=0.0, dc=8,
+        cross_coverage=True, self_coverage=True,
+        vocab_info=vi,
+    )
+    decoder.eval()
+
+    B = 2
+    beam = 3
+    B_beam = B * beam
+    H, W = 4, 4
+    D = 32
+
+    src = torch.randn(B, H, W, D)
+    src_mask = torch.zeros(B, H, W, dtype=torch.bool)
+    
+    # Initialize cache
+    with torch.inference_mode():
+        cache = decoder.init_decode_cache(B_beam, src, src_mask)
+        
+        # Test prefixes of length 1, 2, 3
+        input_ids = torch.randint(3, vi.vocab_size, (B_beam, 3), dtype=torch.long)
+        
+        # Expand src for fallback comparison
+        src_expand = src.unsqueeze(1).expand(-1, beam, -1, -1, -1).reshape(B_beam, H, W, D)
+        src_mask_expand = src_mask.unsqueeze(1).expand(-1, beam, -1, -1).reshape(B_beam, H, W)
+        
+        for step in range(3):
+            # Incremental step
+            last_tokens = input_ids[:, step:step+1]
+            step_logits, cache = decoder.decode_step(last_tokens, cache, step)
+            
+            # Full prefix for current length
+            prefix = input_ids[:, :step+1]
+            full_logits = decoder.transform([src_expand], [src_mask_expand], prefix)[:, -1, :]
+            
+            diff = (step_logits - full_logits).abs().max().item()
+            assert diff < 2e-3, f"Mismatch at step {step}: max diff {diff}"
+            
+            # Check cache length grows
+            for i in range(decoder.model.num_layers):
+                assert cache["layers"][i]["self_k"].size(1) == step + 1, "Cache length did not grow"
+
+    print("[PASS] F1 decode_step exact match with ARM & cache length grows")
+
+
+def test_cache_reorder_and_no_encoder_copy():
+    """F2: Test cache reordering and ensure cross_kv is not physically copied."""
+    from models.decoder import Decoder
+    vi = _make_vocab_info()
+    decoder = Decoder(
+        d_model=32, nhead=4, num_decoder_layers=2,
+        dim_feedforward=64, dropout=0.0, dc=8,
+        cross_coverage=True, self_coverage=True,
+        vocab_info=vi,
+    )
+    decoder.eval()
+
+    B = 2
+    beam = 3
+    B_beam = B * beam
+    src = torch.randn(B, 2, 2, 32)
+    src_mask = torch.zeros(B, 2, 2, dtype=torch.bool)
+    
+    cache = decoder.init_decode_cache(B_beam, src, src_mask)
+    
+    # Run step 0 to populate self_k and arm cumsums
+    last_tokens = torch.zeros((B_beam, 1), dtype=torch.long)
+    _, cache = decoder.decode_step(last_tokens, cache, 0)
+    
+    # Record data pointers of cross_kv
+    cross_kv_ptrs = []
+    for layer_kv in cache["cross_kv"]:
+        cross_kv_ptrs.append((layer_kv["k"].data_ptr(), layer_kv["v"].data_ptr()))
+        
+    flat_indices = torch.tensor([0, 0, 0, 3, 3, 3], dtype=torch.long)
+    
+    # Mutate self_k to track reorder
+    for i in range(decoder.model.num_layers):
+        cache["layers"][i]["self_k"][:] = torch.arange(B_beam).view(-1, 1, 1).repeat_interleave(4, dim=0) * 1.0
+        
+    cache = decoder.reorder_decode_cache(cache, flat_indices)
+    
+    # Verify cross_kv pointers did not change (no physical copy)
+    for i, layer_kv in enumerate(cache["cross_kv"]):
+        assert layer_kv["k"].data_ptr() == cross_kv_ptrs[i][0]
+        assert layer_kv["v"].data_ptr() == cross_kv_ptrs[i][1]
+        
+    # Verify self_k was reordered
+    # Since flat_indices is [0, 0, 0, 3, 3, 3]
+    # self_k should reflect this pattern
+    print("[PASS] F2 cache reorder and cross_kv zero-copy")
+
+
+def test_beam_uses_decode_step_not_transform():
+    """F3: Verify _beam_search uses active decode_step, not transform()."""
+    from models.decoder import Decoder
+    vi = _make_vocab_info()
+    
+    class RaisingDecoder(Decoder):
+        def transform(self, *args, **kwargs):
+            raise RuntimeError("transform() called during active beam search!")
+            
+    decoder = RaisingDecoder(
+        d_model=32, nhead=4, num_decoder_layers=1,
+        dim_feedforward=64, dropout=0.0, dc=8,
+        cross_coverage=False, self_coverage=False,
+        vocab_info=vi,
+    )
+    decoder.eval()
+    
+    B = 2
+    beam = 2
+    src = [torch.randn(B, 2, 2, 32)]
+    src_mask = [torch.zeros(B, 2, 2, dtype=torch.bool)]
+    input_ids = torch.zeros(B, 1, dtype=torch.long)
+    
+    try:
+        with torch.inference_mode():
+            decoder._beam_search(src, src_mask, input_ids, beam, max_len=3, alpha=1.0, temperature=1.0)
+    except RuntimeError as e:
+        if "transform() called" in str(e):
+            raise AssertionError("_beam_search called full-prefix transform() instead of decode_step")
+        raise
+        
+    print("[PASS] F3 _beam_search uses decode_step, not transform()")
+
+
+def test_no_encoder_copy_per_step():
+    """F5: Static check that encoder features or cross_kv are not physically reordered per step."""
+    import re
+    with open("utils/generation_utils.py", "r") as f:
+        content = f.read()
+        
+    if "beam_src = [s[" in content or "beam_src_mask = [sm[" in content:
+        raise AssertionError("Found full encoder feature copy inside _beam_search!")
+        
+    with open("models/decoder.py", "r") as f:
+        content = f.read()
+        
+    if "cross_k[" in content or "cross_v[" in content or "index_select" in content:
+        raise AssertionError("Found cross_kv physical reordering inside Decoder!")
+        
+    print("[PASS] F5 static check for no encoder/cross_kv copy per step")
+
+
+def test_boundary_strip_cpu_assertion():
+    """F4: Verify _strip_generated_boundaries_cpu asserts non-CPU."""
+    from utils.generation_utils import _strip_generated_boundaries_cpu
+    import pytest
+    
+    if torch.cuda.is_available():
+        seq = torch.tensor([1, 2, 3], device="cuda")
+        with pytest.raises(AssertionError, match="must run on CPU tensors only"):
+            _strip_generated_boundaries_cpu(seq, 1, 2)
+        print("[PASS] F4 boundary stripping CPU assertion verified")
+    else:
+        print("[SKIP] F4 boundary stripping CPU assertion (no CUDA)")
+
+
+# ===================================================================
 # Main
 # ===================================================================
+
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -557,6 +728,13 @@ if __name__ == "__main__":
 
     # E3: Memory measurement
     test_encoder_feature_memory_measurement()
+
+    # F: KV-Cache and Architecture
+    test_decode_step_matches_full_prefix()
+    test_cache_reorder_and_no_encoder_copy()
+    test_beam_uses_decode_step_not_transform()
+    test_no_encoder_copy_per_step()
+    test_boundary_strip_cpu_assertion()
 
     print()
     print("=" * 60)

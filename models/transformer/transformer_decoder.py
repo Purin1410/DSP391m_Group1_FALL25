@@ -1,6 +1,6 @@
 import copy
 from functools import partial
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -59,6 +59,68 @@ class TransformerDecoder(nn.Module):
             output = self.norm(output)
 
         return output
+
+    def forward_step(
+        self,
+        tgt: Tensor,
+        cache: dict,
+        beam_origin: Tensor,
+        memory_key_padding_mask: Tensor,
+        height: int,
+    ) -> Tuple[Tensor, dict]:
+        """
+        tgt: [1, B_beam, D]
+        cache: Decoder full cache dict
+        beam_origin: [B_beam]
+        memory_key_padding_mask: [B, src_len]
+        """
+        output = tgt
+
+        for i, mod in enumerate(self.layers):
+            arm_fn = None
+            if self.arm is not None and i > 0:
+                def arm_fn_closure(first_pass_attn: Tensor, rows_s: Tensor, src_idx: int, i_val=i):
+                    # first_pass_attn: [count_s, nhead, 1, src_len]
+                    p = cache["arm"]["final_attn_cumsum"][i_val - 1][rows_s] # [count_s, nhead, src_len]
+                    s = cache["arm"]["first_pass_cumsum"][i_val][rows_s] # [count_s, nhead, src_len]
+                    
+                    p_flat = p.view(-1, p.size(-1))
+                    first_pass_flat = first_pass_attn.view(-1, 1, first_pass_attn.size(-1))
+                    
+                    # self_attn_cumsum includes the current element
+                    s_flat = s.view(-1, s.size(-1)) + first_pass_flat.squeeze(1)
+                    
+                    mask = memory_key_padding_mask[src_idx:src_idx+1].expand(rows_s.numel(), -1)
+                    
+                    cov = self.arm.forward_step(p_flat, s_flat, first_pass_flat, mask, height)
+                    
+                    # Update first pass cumsum inplace
+                    cache["arm"]["first_pass_cumsum"][i_val][rows_s] += first_pass_attn.squeeze(2)
+                    
+                    return cov.view(rows_s.numel(), self.arm.nhead, 1, -1)
+                    
+                arm_fn = arm_fn_closure
+
+            output, layer_cache, attn = mod.forward_step(
+                tgt=output,
+                cache=cache["layers"][i],
+                cross_k=cache["cross_kv"][i]["k"],
+                cross_v=cache["cross_kv"][i]["v"],
+                beam_origin=beam_origin,
+                memory_key_padding_mask=memory_key_padding_mask,
+                arm_fn=arm_fn,
+            )
+            cache["layers"][i] = layer_cache
+
+            if self.arm is not None:
+                attn_reshaped = attn.view(-1, self.arm.nhead, attn.size(-1)) # [B_beam, nhead, src_len]
+                cache["arm"]["final_attn_cumsum"][i] += attn_reshaped
+
+        if self.norm is not None:
+            output = self.norm(output)
+
+        return output, cache
+
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -128,3 +190,47 @@ class TransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
         return tgt, attn
+
+    def forward_step(
+        self,
+        tgt: Tensor,
+        cache: dict,
+        cross_k: Tensor,
+        cross_v: Tensor,
+        beam_origin: Tensor,
+        memory_key_padding_mask: Tensor,
+        arm_fn=None,
+    ) -> Tuple[Tensor, dict, Tensor]:
+        """
+        tgt: [1, B_beam, D]
+        cache: layer cache dict {"self_k": ..., "self_v": ...}
+        cross_k, cross_v: [B * nhead, src_len, head_dim]
+        beam_origin: [B_beam]
+        memory_key_padding_mask: [B, src_len]
+        """
+        tgt2, new_self_k, new_self_v, _ = self.self_attn.forward_step(
+            query=tgt,
+            cached_k=cache.get("self_k"),
+            cached_v=cache.get("self_v"),
+        )
+        cache["self_k"] = new_self_k
+        cache["self_v"] = new_self_v
+
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt)
+
+        tgt2, _, _, attn = self.multihead_attn.forward_step(
+            query=tgt,
+            cached_k=cross_k,
+            cached_v=cross_v,
+            beam_origin=beam_origin,
+            arm_fn=arm_fn,
+            key_padding_mask=memory_key_padding_mask,
+        )
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt)
+        
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt)
+        return tgt, cache, attn
