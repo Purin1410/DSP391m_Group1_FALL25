@@ -320,7 +320,7 @@ class DecodeModel(pl.LightningModule):
         pad_id = self.vocab_info.pad_id
 
         input_ids_cpu = input_ids.detach().cpu()
-        final_scores_cpu = final_scores.detach().cpu()
+        # final_scores_cpu = final_scores.detach().cpu()
 
         all_hyps = []
         for i in range(batch_size * beam_size):
@@ -329,7 +329,7 @@ class DecodeModel(pl.LightningModule):
             stripped = _strip_generated_boundaries_cpu(non_pad, sos_id, eos_id)
             all_hyps.append(stripped)
 
-        return all_hyps, final_scores_cpu
+        return all_hyps, final_scores # final_scores_cpu
 
     def _rate(
         self,
