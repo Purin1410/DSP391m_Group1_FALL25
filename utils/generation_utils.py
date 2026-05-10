@@ -165,8 +165,8 @@ class DecodeModel(pl.LightningModule):
         end_tokens[half:] = self.vocab_info.sos_id
 
         # Expand for beams
-        input_ids = input_ids.unsqueeze(1).expand(batch_size, beam_size).contiguous().view(-1, 1)
-        end_tokens = end_tokens.unsqueeze(1).expand(batch_size, beam_size).contiguous().view(-1)
+        input_ids = input_ids.repeat_interleave(beam_size, dim=0)  # [batch_size * beam_size, seq_len]
+        end_tokens = end_tokens.repeat_interleave(beam_size)       # [batch_size * beam_size]
 
         beam_scores = torch.zeros((batch_size, beam_size), dtype=torch.float, device=self.device)
         beam_scores[:, 1:] = -1e9
@@ -195,13 +195,13 @@ class DecodeModel(pl.LightningModule):
             
             input_ids = input_ids[flat_indices]
             done_mask = done_mask[flat_indices]
+            end_tokens = end_tokens[flat_indices]
             beam_scores = next_scores.view(-1)
-            end_tokens_flat = end_tokens[flat_indices]
             
             token_indices = token_indices.view(-1, 1)
             input_ids = torch.cat([input_ids, token_indices], dim=1)
             
-            is_end_token = (token_indices.squeeze(-1) == end_tokens_flat)
+            is_end_token = token_indices.squeeze(-1) == end_tokens
             done_mask = done_mask | is_end_token
 
             # NOTE: Early stopping via `done_mask.all()` is intentionally

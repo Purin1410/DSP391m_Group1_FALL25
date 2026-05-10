@@ -15,75 +15,67 @@ Data = List[Tuple[str, object, List[str]]]
 
 from torch.utils.data import Sampler
 import random
+import math
+import torch.distributed as dist
 
 class BucketedBatchSampler(Sampler):
-    def __init__(self, data: Data, max_pixels_per_batch: int, max_batch_size: int, shuffle: bool = True, drop_last: bool = False, maxlen: int = 200, max_image_size: int = 32e4):
+    def __init__(
+        self,
+        data: Data,
+        max_pixels_per_batch: int,
+        max_batch_size: int,
+        shuffle: bool = True,
+        drop_last: bool = False,
+        maxlen: int = 200,
+        max_image_size: int = 32e4,
+    ):
         self.data = data
         self.max_pixels_per_batch = max_pixels_per_batch
         self.max_batch_size = max_batch_size
-        self.shuffle = shuffle
+
+        self.batch_size = max_batch_size
         self.drop_last = drop_last
+
+        self.shuffle = shuffle
         self.maxlen = maxlen
         self.max_image_size = max_image_size
-        
         self.batches = self._build_batches()
 
-    def _build_batches(self):
-        # Create list of indices
-        indices = list(range(len(self.data)))
-        
-        # Function to get area
-        def get_area(idx):
-            fea = self.data[idx][1]
-            if hasattr(fea, "size"):
-                return fea.size[0] * fea.size[1]
-            return fea[0] * fea[1]
-            
-        # Filter indices by maxlen and max_image_size
-        valid_indices = []
-        for idx in indices:
-            _, fea, lab = self.data[idx]
-            size = get_area(idx)
-            if len(lab) > self.maxlen:
-                continue
-            if size > self.max_image_size:
-                continue
-            valid_indices.append(idx)
-            
-        valid_indices.sort(key=get_area)
-        
-        batches = []
-        current_batch = []
-        biggest_image_size = 0
-        
-        for idx in valid_indices:
-            size = get_area(idx)
-            if size > biggest_image_size:
-                biggest_image_size = size
-            
-            batch_image_size = biggest_image_size * (len(current_batch) + 1)
-            
-            if batch_image_size > self.max_pixels_per_batch or len(current_batch) == self.max_batch_size:
-                if len(current_batch) > 0:
-                    batches.append(current_batch)
-                current_batch = []
-                biggest_image_size = size
-                
-            current_batch.append(idx)
-            
-        if len(current_batch) > 0 and not self.drop_last:
-            batches.append(current_batch)
-            
-        print(f"total {len(batches)} batch data loaded")
-        return batches
+    def _ddp_info(self):
+        if dist.is_available() and dist.is_initialized():
+            return dist.get_world_size(), dist.get_rank()
+        return 1, 0
 
     def __iter__(self):
+        batches = list(self.batches)
+
         if self.shuffle:
-            random.shuffle(self.batches)
-        return iter(self.batches)
+            random.shuffle(batches)
+
+        world_size, rank = self._ddp_info()
+
+        if world_size > 1:
+            if self.drop_last:
+                total = (len(batches) // world_size) * world_size
+                batches = batches[:total]
+            else:
+                remainder = len(batches) % world_size
+                if remainder != 0:
+                    padding = world_size - remainder
+                    batches += batches[:padding]
+
+            batches = batches[rank::world_size]
+
+        return iter(batches)
 
     def __len__(self):
-        return len(self.batches)
+        world_size, _ = self._ddp_info()
+        if world_size == 1:
+            return len(self.batches)
+
+        if self.drop_last:
+            return len(self.batches) // world_size
+        return math.ceil(len(self.batches) / world_size)
 
 def _resolve_image_path(
     img_dir: Path,

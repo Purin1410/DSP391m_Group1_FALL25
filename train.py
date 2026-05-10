@@ -65,6 +65,7 @@ def train(config):
         callbacks               = callback,
         default_root_dir        = config.trainer.default_root_dir,
         resume_from_checkpoint  = config.trainer.resume_from_checkpoint,
+        replace_sampler_ddp=False,
     )
     
     trainer.fit(model_module,data_module)
