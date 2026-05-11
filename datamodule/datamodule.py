@@ -58,19 +58,19 @@ class CROHMEDatamodule(pl.LightningDataModule):
         max_height_x = max(heights_x) if n_samples > 0 else 0
         max_width_x = max(widths_x) if n_samples > 0 else 0
         
-        pad_strategy = self.config.data.get("pad_strategy", "batch_max")
-        pad_to_multiple = self.config.data.get("pad_to_multiple", 32)
-        static_pad_height = self.config.data.get("static_pad_height", None)
-        static_pad_width = self.config.data.get("static_pad_width", None)
+        # pad_strategy = self.config.data.get("pad_strategy", "batch_max")
+        # pad_to_multiple = self.config.data.get("pad_to_multiple", 32)
+        # static_pad_height = self.config.data.get("static_pad_height", None)
+        # static_pad_width = self.config.data.get("static_pad_width", None)
 
-        if pad_strategy == "bucket":
-            max_height_x = ((max_height_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
-            max_width_x = ((max_width_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
-        elif pad_strategy == "static":
-            if static_pad_height is not None:
-                max_height_x = max(max_height_x, static_pad_height)
-            if static_pad_width is not None:
-                max_width_x = max(max_width_x, static_pad_width)
+        # if pad_strategy == "bucket":
+        #     max_height_x = ((max_height_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
+        #     max_width_x = ((max_width_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
+        # elif pad_strategy == "static":
+        #     if static_pad_height is not None:
+        #         max_height_x = max(max_height_x, static_pad_height)
+        #     if static_pad_width is not None:
+        #         max_width_x = max(max_width_x, static_pad_width)
 
         x = torch.zeros(n_samples, 1, max_height_x, max_width_x)
         x_mask = torch.ones(n_samples, max_height_x, max_width_x, dtype=torch.bool)
@@ -173,7 +173,8 @@ class CROHMEDatamodule(pl.LightningDataModule):
             max_batch_size=self.train_batch_size,
             shuffle=True,
             maxlen=self.maxlen,
-            max_image_size=self.max_pixels_per_batch
+            max_image_size=self.max_pixels_per_batch,
+            seed=self.config.seed_everything
         )
         return DataLoader(
             dataset             = self.train_dataset,
@@ -192,7 +193,8 @@ class CROHMEDatamodule(pl.LightningDataModule):
             max_batch_size=self.eval_batch_size,
             shuffle=False,
             maxlen=self.maxlen,
-            max_image_size=self.max_pixels_per_batch
+            max_image_size=self.max_pixels_per_batch,
+            seed=self.config.seed_everything
         )
         return DataLoader(
             dataset             = self.val_dataset,
@@ -211,7 +213,8 @@ class CROHMEDatamodule(pl.LightningDataModule):
             max_batch_size=self.eval_batch_size,
             shuffle=False,
             maxlen=self.maxlen,
-            max_image_size=self.max_pixels_per_batch
+            max_image_size=self.max_pixels_per_batch,
+            seed=self.config.seed_everything
         )
         return DataLoader(
             dataset             = self.test_dataset,

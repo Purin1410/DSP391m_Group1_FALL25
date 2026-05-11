@@ -1,13 +1,15 @@
 from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
-import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from .utils import Hypothesis, ce_loss, to_tgt_output
 from einops import rearrange
 from einops.einops import repeat
 from torch import FloatTensor, LongTensor
+from utils.vocab_info import VocabInfo
+from .beam_search import BeamSearchScorer
 
 
 # modified from
@@ -61,7 +63,11 @@ def _strip_generated_boundaries_cpu(
 
 
 
-class DecodeModel(pl.LightningModule):
+class DecodeModel(nn.Module):
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     @abstractmethod
     def transform(
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
@@ -84,31 +90,6 @@ class DecodeModel(pl.LightningModule):
         """
         raise NotImplementedError("This is an abstract method.")
 
-    def init_decode_cache(
-        self, batch_beam_size: int, src: FloatTensor, src_mask: LongTensor
-    ) -> dict:
-        """Initialize KV-cache for Stage 2. Stage 1 base class returns fallback cache."""
-        return {"src": [src], "src_mask": [src_mask]}
-
-    def reorder_decode_cache(self, cache: dict, new_order: LongTensor) -> dict:
-        """Reorder KV-cache after beam selection."""
-        if "src" in cache:
-            cache["src"] = [s_elem[new_order] for s_elem in cache["src"]]
-            cache["src_mask"] = [sm_elem[new_order] for sm_elem in cache["src_mask"]]
-        return cache
-
-    def decode_step(
-        self,
-        last_tokens: LongTensor,
-        cache: dict,
-        step: int,
-        input_ids: LongTensor,
-    ) -> Tuple[FloatTensor, dict]:
-        """Incremental decode interface — Stage 1 (full-prefix fallback)."""
-        src = cache.get("src", [])
-        src_mask = cache.get("src_mask", [])
-        logits = self.transform(src, src_mask, input_ids)[:, -1, :]
-        return logits, cache
 
     def beam_search(
         self,
@@ -163,14 +144,18 @@ class DecodeModel(pl.LightningModule):
         )
         input_ids = torch.cat((l2r, r2l), dim=0)
 
+        beam_scorer = BeamSearchScorer(
+            batch_size, beam_size, alpha, early_stopping, self.device, self.vocab_info
+        )
+
         # first beam search
         hyps, scores = self._beam_search(
             src=src,
             src_mask=src_mask,
             input_ids=input_ids,
+            beam_scorer=beam_scorer,
             beam_size=beam_size,
             max_len=max_len,
-            alpha=alpha,
             temperature=temperature,
         )
 
@@ -226,110 +211,59 @@ class DecodeModel(pl.LightningModule):
         src: List[FloatTensor],
         src_mask: List[LongTensor],
         input_ids: LongTensor,
+        beam_scorer: BeamSearchScorer,
         beam_size: int,
         max_len: int,
-        alpha: float,
         temperature: float,
     ) -> Tuple[List[LongTensor], FloatTensor]:
-        batch_size = input_ids.shape[0]
-        half = batch_size // 2
+        batch_size, cur_len = input_ids.shape
+        vocab_size = self.vocab_info.vocab_size
 
-        end_tokens = torch.zeros(batch_size, dtype=torch.long, device=self.device)
-        end_tokens[:half] = self.vocab_info.eos_id
-        end_tokens[half:] = self.vocab_info.sos_id
+        beam_scores = torch.zeros(batch_size, dtype=torch.float, device=self.device)
 
-        # Expand for beams
-        input_ids = input_ids.repeat_interleave(beam_size, dim=0)  # [batch_size * beam_size, seq_len]
-        end_tokens = end_tokens.repeat_interleave(beam_size)       # [batch_size * beam_size]
-
-        assert len(src) == 1 and len(src_mask) == 1
-        
-        # In Stage 1 fallback, this caches [B, H, W, D].
-        # The reorder cache handles fallback expansion dynamically.
-        # Wait, the fallback needs [batch_size * beam_size] expansion!
-        # If the fallback gets [B], it won't work because input_ids are [B*beam].
-        # Let's expand src ONCE for the fallback just in case.
-        # But wait! If we do `self.init_decode_cache(batch_size * beam_size, src[0], src_mask[0])`,
-        # and the fallback `init_decode_cache` just returns `[src]`, the shapes mismatch.
-        # We should ensure the fallback works exactly as before.
-        # Actually, let's just do:
-        B_tgt = batch_size * beam_size
-        s = src[0].unsqueeze(1).expand(-1, beam_size, *( [-1] * (src[0].dim() - 1) )).reshape(B_tgt, *src[0].shape[1:])
-        sm = src_mask[0].unsqueeze(1).expand(-1, beam_size, *( [-1] * (src_mask[0].dim() - 1) )).reshape(B_tgt, *src_mask[0].shape[1:])
-        
-        # But wait, we MUST not copy encoder features per step!
-        # `Decoder.init_decode_cache` will ignore `src` if it wants to, or use it.
-        # Wait, Decoder expects original `[B, H, W, D]` and `batch_beam_size`.
-        # So we should pass `src[0]` NOT expanded to `init_decode_cache`!
-        # And we can just pass `s` to the fallback.
-        cache = self.init_decode_cache(B_tgt, src[0], src_mask[0])
-        
-        # For base class fallback, if it returned `[src[0]]` without expanding, we override it here.
-        if "src" in cache and cache["src"][0].shape[0] != B_tgt:
-            cache["src"] = [s]
-            cache["src_mask"] = [sm]
-
-        beam_scores = torch.zeros((batch_size, beam_size), dtype=torch.float, device=self.device)
-        beam_scores[:, 1:] = -1e9
-        beam_scores = beam_scores.view(-1)
-
-        done_mask = torch.zeros(batch_size * beam_size, dtype=torch.bool, device=self.device)
-
-        last_tokens = input_ids  # [B*beam, 1]
-
-        for step in range(max_len):
-            next_token_logits, cache = self.decode_step(last_tokens, cache, step, input_ids)
-            next_token_logits = next_token_logits / temperature
+        while cur_len < max_len and not beam_scorer.is_done():
+            next_token_logits = (
+                self.transform(src, src_mask, input_ids)[:, -1, :] / temperature
+            )
             next_token_scores = F.log_softmax(next_token_logits, dim=-1)
 
-            # Done beams can only generate PAD with 0 cost
-            next_token_scores[done_mask, :] = -1e9
-            next_token_scores[done_mask, self.vocab_info.pad_id] = 0.0
+            next_token_scores = next_token_scores + beam_scores[:, None].expand_as(
+                next_token_scores
+            )
+            
+            reshape_size = next_token_scores.shape[0] // batch_size
+            next_token_scores = rearrange(
+                next_token_scores,
+                "(b m) v -> b (m v)",
+                m=reshape_size,
+            )
 
-            next_scores = beam_scores.unsqueeze(-1) + next_token_scores
-            next_scores = next_scores.view(batch_size, beam_size * self.vocab_info.vocab_size)
+            next_token_scores, next_tokens = torch.topk(
+                next_token_scores, 2 * beam_size, dim=1
+            )
 
-            next_scores, next_tokens = torch.topk(next_scores, beam_size, dim=1)
+            next_indices = next_tokens // vocab_size
+            next_tokens = next_tokens % vocab_size
 
-            beam_indices = next_tokens // self.vocab_info.vocab_size
-            token_indices = next_tokens % self.vocab_info.vocab_size
+            if cur_len == 1:
+                input_ids = repeat(input_ids, "b l -> (b m) l", m=beam_size)
+                for i in range(len(src)):
+                    src[i] = repeat(src[i], "b ... -> (b m) ...", m=beam_size)
+                    src_mask[i] = repeat(src_mask[i], "b ... -> (b m) ...", m=beam_size)
 
-            batch_indices = torch.arange(batch_size, device=self.device).unsqueeze(1).expand(-1, beam_size)
-            flat_indices = (batch_indices * beam_size + beam_indices).view(-1)
+            beam_scores, beam_next_tokens, beam_idx = beam_scorer.process(
+                input_ids=input_ids,
+                next_scores=next_token_scores,
+                next_tokens=next_tokens,
+                next_indices=next_indices,
+            )
 
-            input_ids = input_ids[flat_indices]
-            done_mask = done_mask[flat_indices]
-            end_tokens = end_tokens[flat_indices]
-            beam_scores = next_scores.view(-1)
+            input_ids = torch.cat(
+                (input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)), dim=-1
+            )
+            cur_len += 1
 
-            cache = self.reorder_decode_cache(cache, flat_indices)
-
-            token_indices = token_indices.view(-1, 1)
-            input_ids = torch.cat([input_ids, token_indices], dim=1)
-            last_tokens = token_indices
-
-            is_end_token = token_indices.squeeze(-1) == end_tokens
-            done_mask = done_mask | is_end_token
-
-        seq_lens = (input_ids != self.vocab_info.pad_id).sum(dim=1).float()
-        final_scores = beam_scores / (seq_lens ** alpha)
-
-        # --- A1: Strip generated boundary tokens ---
-        sos_id = self.vocab_info.sos_id
-        eos_id = self.vocab_info.eos_id
-        pad_id = self.vocab_info.pad_id
-
-        input_ids_cpu = input_ids.detach().cpu()
-        # final_scores_cpu = final_scores.detach().cpu()
-
-        all_hyps = []
-        for i in range(batch_size * beam_size):
-            seq = input_ids_cpu[i]
-            non_pad = seq[seq != pad_id]
-            stripped = _strip_generated_boundaries_cpu(non_pad, sos_id, eos_id)
-            all_hyps.append(stripped)
-
-        return all_hyps, final_scores # final_scores_cpu
+        return beam_scorer.finalize(input_ids, beam_scores)
 
     def _rate(
         self,
@@ -361,29 +295,10 @@ class DecodeModel(pl.LightningModule):
             [b * beam_size]
         """
         b = tgt.shape[0]
-        beam_size = b // src[0].shape[0]
-        chunk_size = beam_size * max(1, 32 // beam_size)
-
-        losses = []
-        for i in range(0, b, chunk_size):
-            tgt_chunk = tgt[i : i + chunk_size]
-            out_chunk = out[i : i + chunk_size]
-
-            src_start = i // beam_size
-            src_end = src_start + (tgt_chunk.shape[0] // beam_size)
-
-            src_chunk = [s[src_start:src_end] for s in src]
-            src_mask_chunk = [sm[src_start:src_end] for sm in src_mask]
-
-            out_hat = self.transform(src_chunk, src_mask_chunk, tgt_chunk) / temperature
-
-            loss = ce_loss(out_hat, out_chunk, ignore_idx=self.vocab_info.pad_id, reduction="none")
-            loss = rearrange(loss, "(b l) -> b l", b=tgt_chunk.shape[0])
-
-            mask = tgt_chunk == self.vocab_info.pad_id
-            penalty = (~mask).sum(dim=1) ** alpha
-            loss = -torch.sum(loss, dim=1) / penalty
-
-            losses.append(loss)
-
-        return torch.cat(losses, dim=0)
+        out_hat = self.transform(src, src_mask, tgt) / temperature
+        loss = ce_loss(out_hat, out, ignore_idx=self.vocab_info.pad_id, reduction="none")
+        loss = rearrange(loss, "(b l) -> b l", b=b)
+        mask = tgt == self.vocab_info.pad_id
+        penalty = (~mask).sum(dim=1) ** alpha
+        loss = -torch.sum(loss, dim=1) / penalty
+        return loss

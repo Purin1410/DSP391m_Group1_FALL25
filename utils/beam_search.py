@@ -1,10 +1,3 @@
-# ============================================================
-# DEPRECATED — NOT USED BY THE OPTIMIZED GENERATION PATH
-# This file (BeamSearchScorer) is kept only for backward
-# compatibility. The active beam search lives in
-# utils/generation_utils.py (DecodeModel._beam_search).
-# Do NOT import this at the top of training or inference code.
-# ============================================================
 from typing import List, Optional, Tuple
 
 import torch
@@ -13,7 +6,7 @@ from torch import FloatTensor, LongTensor
 # modified from
 # https://github.com/huggingface/transformers/blob/af6e01c5bc39467f1e3ce47a2135fb1777af1db2/src/transformers/generation_beam_search.py#L206
 class BeamSearchScorer:
-    """Legacy beam-search scorer.  NOT used by the current training pipeline.
+    """Active beam-search scorer.
 
     Pass ``vocab`` explicitly rather than relying on a global class attribute.
     All `.item()` / `.tolist()` calls inside this class are acceptable because
@@ -27,7 +20,7 @@ class BeamSearchScorer:
         alpha: float,
         do_early_stopping: bool,
         device: torch.device,
-        vocab=None,  # pass explicitly; do NOT read CROHMEDatamodule.shared_vocab here
+        vocab,  # pass explicitly; do NOT read CROHMEDatamodule.shared_vocab here
     ) -> None:
         self.batch_size = batch_size
         self.beam_size = beam_size
@@ -97,7 +90,7 @@ class BeamSearchScorer:
                 assert len(beam_hyp) >= self.beam_size
                 # pad the batch
                 next_beam_scores[batch_idx, :] = 0
-                next_beam_tokens[batch_idx, :] = vocab.PAD_IDX
+                next_beam_tokens[batch_idx, :] = vocab.pad_id
                 next_beam_indices[batch_idx, :] = batch_idx * self.beam_size
                 continue
 
@@ -113,12 +106,12 @@ class BeamSearchScorer:
                 # NOTE: .item() calls here are acceptable — this class is NOT on the
                 # hot training/inference path (see DEPRECATED notice at top of file).
                 l2r_done = (
-                    input_ids[batch_beam_idx][0].item() == vocab.SOS_IDX
-                    and next_token.item() == vocab.EOS_IDX
+                    input_ids[batch_beam_idx][0].item() == vocab.sos_id
+                    and next_token.item() == vocab.eos_id
                 )
                 r2l_done = (
-                    input_ids[batch_beam_idx][0].item() == vocab.EOS_IDX
-                    and next_token.item() == vocab.SOS_IDX
+                    input_ids[batch_beam_idx][0].item() == vocab.eos_id
+                    and next_token.item() == vocab.sos_id
                 )
                 if l2r_done or r2l_done:
                     if beam_token_rank >= self.beam_size:

@@ -2,7 +2,7 @@ import argparse
 import zipfile
 
 import torch
-from omegaconf import OmegaConf
+from sconf import Config
 from tqdm import tqdm
 
 from datamodule import CROHMEDatamodule
@@ -11,7 +11,7 @@ from lit_comer import LitCoMER
 
 def main(config_path: str, ckp_path: str, output_zip: str = "result.zip"):
     # Load config consistently with training
-    config = OmegaConf.load(config_path)
+    config = Config(config_path)
 
     dm = CROHMEDatamodule(config=config)
     dm.setup("test")

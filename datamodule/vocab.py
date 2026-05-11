@@ -1,13 +1,7 @@
 from typing import Dict, List, Any
 from dataclasses import dataclass
 
-@dataclass(frozen=True)
-class VocabInfo:
-    vocab_size: int
-    sos_id: int
-    eos_id: int
-    pad_id: int
-    words: Any
+from utils.vocab_info import VocabInfo
 
 
 class Vocab:
