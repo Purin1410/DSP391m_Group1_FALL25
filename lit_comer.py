@@ -98,10 +98,32 @@ class LitCoMER(pl.LightningModule):
         )
     
     def on_train_epoch_start(self):
-        train_loader = getattr(self.trainer, "train_dataloader", None)
-        sampler = getattr(train_loader, "batch_sampler", None)
-        if hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(int(self.current_epoch))
+        sampler = None
+
+        datamodule = getattr(self.trainer, "datamodule", None)
+        if datamodule is not None:
+            sampler = getattr(datamodule, "train_batch_sampler", None)
+
+        if sampler is None:
+            loaders = getattr(self.trainer, "train_dataloaders", None)
+            if loaders is None:
+                loaders = getattr(self.trainer, "train_dataloader", None)
+            if loaders is not None and not isinstance(loaders, (list, tuple)):
+                loaders = [loaders]
+            if loaders:
+                for loader in loaders:
+                    candidate = getattr(loader, "batch_sampler", None)
+                    if hasattr(candidate, "set_epoch"):
+                        sampler = candidate
+                        break
+
+        if not hasattr(sampler, "set_epoch"):
+            raise RuntimeError(
+                "Could not find BucketedBatchSampler in on_train_epoch_start; "
+                "epoch-dependent shuffling would be frozen."
+            )
+
+        sampler.set_epoch(int(self.current_epoch))
     def validation_epoch_end(self, *args, **kwargs):
         pass
     def training_step_end(self, *args, **kwargs):

@@ -95,5 +95,9 @@ unzip -q data.zip
 # evaluation
 # evaluate model in lightning_logs/version_0 on all CROHME test sets
 # results will be printed in the screen and saved to lightning_logs/version_0 folder
+# Official metric run: single process only to avoid DDP duplicate padding.
+# Adjust the checkpoint/config arguments as needed.
+# CUDA_VISIBLE_DEVICES=0 python train.py --config configs/crohme_config.yaml --trainer.gpus 1 --trainer.accelerator null
+
 bash eval_all.sh 0
 ```

@@ -44,6 +44,10 @@ class CROHMEDatamodule(pl.LightningDataModule):
             CROHMEDatamodule.shared_vocab = Vocab(dict_path=data_config.dictionary_txt)
         self.vocab = CROHMEDatamodule.shared_vocab
         
+        self.train_batch_sampler = None
+        self.val_batch_sampler = None
+        self.test_batch_sampler = None
+        
         print(f"Load data from: {self.zipfile_path}")
     
     def collate_fn(self, batch):
@@ -167,7 +171,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         return worker_init_fn
 
     def train_dataloader(self):
-        batch_sampler = BucketedBatchSampler(
+        self.train_batch_sampler = BucketedBatchSampler(
             data=self.train_dataset.dataset,
             max_pixels_per_batch=self.max_pixels_per_batch,
             max_batch_size=self.train_batch_size,
@@ -178,7 +182,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         )
         return DataLoader(
             dataset             = self.train_dataset,
-            batch_sampler       = batch_sampler,
+            batch_sampler       = self.train_batch_sampler,
             num_workers         = self.num_workers,
             collate_fn          = self.collate_fn,
             pin_memory          = self.pin_memory,
@@ -186,8 +190,12 @@ class CROHMEDatamodule(pl.LightningDataModule):
             worker_init_fn      = self._get_worker_init_fn(),
         )
 
+    # NOTE: In DDP, BucketedBatchSampler may pad by repeating batches so each rank
+    # has the same number of steps. This is fine for training-time validation used
+    # as a rough signal, but official ExpRate should be computed with a single
+    # process to avoid counting duplicated samples.
     def val_dataloader(self):
-        batch_sampler = BucketedBatchSampler(
+        self.val_batch_sampler = BucketedBatchSampler(
             data=self.val_dataset.dataset,
             max_pixels_per_batch=self.max_pixels_per_batch,
             max_batch_size=self.eval_batch_size,
@@ -198,7 +206,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         )
         return DataLoader(
             dataset             = self.val_dataset,
-            batch_sampler       = batch_sampler,
+            batch_sampler       = self.val_batch_sampler,
             num_workers         = self.num_workers,
             collate_fn          = self.collate_fn,
             pin_memory          = self.pin_memory,
@@ -206,8 +214,12 @@ class CROHMEDatamodule(pl.LightningDataModule):
             worker_init_fn      = self._get_worker_init_fn(),
         )
 
+    # NOTE: In DDP, BucketedBatchSampler may pad by repeating batches so each rank
+    # has the same number of steps. This is fine for training-time validation used
+    # as a rough signal, but official ExpRate should be computed with a single
+    # process to avoid counting duplicated samples.
     def test_dataloader(self):
-        batch_sampler = BucketedBatchSampler(
+        self.test_batch_sampler = BucketedBatchSampler(
             data=self.test_dataset.dataset,
             max_pixels_per_batch=self.max_pixels_per_batch,
             max_batch_size=self.eval_batch_size,
@@ -218,10 +230,10 @@ class CROHMEDatamodule(pl.LightningDataModule):
         )
         return DataLoader(
             dataset             = self.test_dataset,
-            batch_sampler       = batch_sampler,
+            batch_sampler       = self.test_batch_sampler,
             num_workers         = self.num_workers,
             collate_fn          = self.collate_fn,
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
             worker_init_fn      = self._get_worker_init_fn(),
-        )
+        )

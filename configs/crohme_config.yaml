@@ -40,7 +40,6 @@ model:
   dc: 32
   cross_coverage: true
   self_coverage: true
-  arm_norm_impl: "legacy"
   # -------- beam search --------
   beam_size: 10
   max_len: 200

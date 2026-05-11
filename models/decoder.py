@@ -25,7 +25,6 @@ def _build_transformer_decoder(
     dc: int,
     cross_coverage: bool,
     self_coverage: bool,
-    arm_norm_impl: str = "legacy",
 ) -> nn.TransformerDecoder:
     decoder_layer = TransformerDecoderLayer(
         d_model=d_model,
@@ -34,7 +33,7 @@ def _build_transformer_decoder(
         dropout=dropout,
     )
     if cross_coverage or self_coverage:
-        arm = AttentionRefinementModule(nhead, dc, cross_coverage, self_coverage, norm_impl=arm_norm_impl)
+        arm = AttentionRefinementModule(nhead, dc, cross_coverage, self_coverage)
     else:
         arm = None
 
@@ -54,7 +53,6 @@ class Decoder(DecodeModel):
         cross_coverage: bool,
         self_coverage: bool,
         vocab_info: VocabInfo,
-        arm_norm_impl: str = "legacy",
     ):
         super().__init__()
         self.vocab_info = vocab_info
@@ -76,7 +74,6 @@ class Decoder(DecodeModel):
             dc=dc,
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
-            arm_norm_impl=arm_norm_impl,
         )
 
         self.proj = nn.Linear(d_model, vocab_info.vocab_size)

@@ -36,8 +36,6 @@ class CoMER(pl.LightningModule):
         dc                  = mcfg.get("dc", 32)
         cross_coverage      = mcfg.get("cross_coverage", True)
         self_coverage       = mcfg.get("self_coverage", True)
-        arm_norm_impl       = mcfg.get("arm_norm_impl", "legacy")
-
         self.encoder = Encoder(
             d_model=d_model, 
             growth_rate=growth_rate, 
@@ -57,7 +55,6 @@ class CoMER(pl.LightningModule):
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
             vocab_info=vocab_info,
-            arm_norm_impl=arm_norm_impl,
         )
 
     def forward(
