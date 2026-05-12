@@ -107,87 +107,11 @@ def train(config):
     
     trainer.fit(model_module,data_module)
 
-import torch
 
-def enable_tf32_if_tensor_cores_available(device = "cuda", verbose = None) -> bool:
-    """
-    Check GPU availability and (if Tensor Cores are present) enable TF32 /
-    set_float32_matmul_precision("high").
-
-    Returns:
-        True if TF32 is enabled, False otherwise
-        (no CUDA / no Tensor Cores / fallback case).
-
-    Notes:
-    - Call this function once at the beginning of the program before training/evaluation.
-    - TF32 / Tensor Cores trade numerical precision for performance.
-      Bit-for-bit reproducibility is not guaranteed when TF32 is enabled.
-    """
-    if not torch.cuda.is_available():
-        if verbose:
-            print("CUDA is not available — TF32 not enabled.")
-        return False
-
-    if device is None:
-        device = torch.cuda.current_device()
-    try:
-        prop = torch.cuda.get_device_properties(device)
-    except Exception as e:
-        if verbose:
-            print(f"Failed to retrieve device properties: {e}")
-        return False
-
-    name = prop.name
-    major = prop.major
-    minor = prop.minor
-    compute_capability = major + minor / 10.0
-
-    has_tensor_cores = major >= 7
-
-    if verbose:
-        print(f"Device {device}: {name}, compute capability {major}.{minor} ({compute_capability})")
-        print(f"Tensor Cores detected (heuristic): {has_tensor_cores}")
-
-    if not has_tensor_cores:
-        if verbose:
-            print("No Tensor Cores detected by heuristic — keeping default settings.")
-        return False
-
-    # Enable TF32 / set precision (if supported)
-    # If PyTorch supports torch.set_float32_matmul_precision (>= ~2.0), prefer using it.
-    if hasattr(torch, "set_float32_matmul_precision"):
-        try:
-            torch.set_float32_matmul_precision("high")
-            if verbose:
-                print('Called torch.set_float32_matmul_precision("high").')
-        except Exception as e:
-            if verbose:
-                print("Failed to call set_float32_matmul_precision:", e)
-
-    # Backend flags (for older / compatible PyTorch versions)
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-    except Exception:
-        print("Cannot activate torch.backends.cuda.matmul.allow_tf32")
-    try:
-        torch.backends.cudnn.allow_tf32 = True
-    except Exception:
-        print("Cannot activate torch.backends.cudnn.allow_tf32")
-
-    if verbose:
-        print("TF32 / allow_tf32 has been enabled (if supported by backend).")
-        print("WARNING: TF32 trades numerical precision for performance; bit-for-bit reproducibility is lost.")
-
-    return True
-
-
-if __name__ == "__main__":
-    enabled = enable_tf32_if_tensor_cores_available()
-    
+if __name__ == "__main__":    
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_args()
     config = Config(args.config)
     print(config.dumps())
-    print("TF32 enabled:", enabled)
     train(config)
