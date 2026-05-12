@@ -21,11 +21,13 @@ class TransformerDecoder(nn.Module):
         num_layers: int,
         arm: Optional[AttentionRefinementModule],
         norm=None,
+        tree_bias_layers: str = "all",
     ):
         super(TransformerDecoder, self).__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
+        self.tree_bias_layers = tree_bias_layers
 
         self.arm = arm
 
@@ -38,11 +40,16 @@ class TransformerDecoder(nn.Module):
         memory_mask: Optional[Tensor] = None,
         tgt_key_padding_mask: Optional[Tensor] = None,
         memory_key_padding_mask: Optional[Tensor] = None,
+        rel_bias: Optional[Tensor] = None,
     ) -> Tensor:
         output = tgt
 
         arm = None
         for i, mod in enumerate(self.layers):
+            layer_rel_bias = rel_bias
+            if self.tree_bias_layers == "last1" and i != self.num_layers - 1:
+                layer_rel_bias = None
+
             output, attn = mod(
                 output,
                 memory,
@@ -51,6 +58,7 @@ class TransformerDecoder(nn.Module):
                 memory_mask=memory_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
                 memory_key_padding_mask=memory_key_padding_mask,
+                rel_bias=layer_rel_bias,
             )
             if i != len(self.layers) - 1 and self.arm is not None:
                 arm = partial(self.arm, attn, memory_key_padding_mask, height)
@@ -97,6 +105,7 @@ class TransformerDecoderLayer(nn.Module):
         memory_mask: Optional[Tensor] = None,
         tgt_key_padding_mask: Optional[Tensor] = None,
         memory_key_padding_mask: Optional[Tensor] = None,
+        rel_bias: Optional[Tensor] = None,
     ) -> Tensor:
         r"""Pass the inputs (and mask) through the decoder layer.
 
@@ -112,7 +121,10 @@ class TransformerDecoderLayer(nn.Module):
             see the docs in Transformer class.
         """
         tgt2 = self.self_attn(
-            tgt, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask
+            tgt, tgt, tgt,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+            rel_bias=rel_bias,
         )[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)

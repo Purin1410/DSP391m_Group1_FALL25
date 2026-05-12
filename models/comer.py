@@ -36,6 +36,13 @@ class CoMER(pl.LightningModule):
         dc                  = mcfg.get("dc", 32)
         cross_coverage      = mcfg.get("cross_coverage", True)
         self_coverage       = mcfg.get("self_coverage", True)
+
+        use_tree_bias       = mcfg.get("use_tree_bias", True)
+        tree_bias_num_buckets = mcfg.get("tree_bias_num_buckets", 16)
+        tree_bias_mode      = mcfg.get("tree_bias_mode", "full")
+        tree_bias_layers    = mcfg.get("tree_bias_layers", "all")
+        tree_bias_rel_set   = mcfg.get("tree_bias_rel_set", "full")
+
         self.encoder = Encoder(
             d_model=d_model, 
             growth_rate=growth_rate, 
@@ -55,6 +62,11 @@ class CoMER(pl.LightningModule):
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
             vocab_info=vocab_info,
+            use_tree_bias=use_tree_bias,
+            tree_bias_num_buckets=tree_bias_num_buckets,
+            tree_bias_mode=tree_bias_mode,
+            tree_bias_layers=tree_bias_layers,
+            tree_bias_rel_set=tree_bias_rel_set,
         )
 
     def forward(
