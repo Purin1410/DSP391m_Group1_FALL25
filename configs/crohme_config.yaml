@@ -115,4 +115,4 @@ wandb:
   project: "DSP391m_Group1_FALL25"
   wandb_watch: false
   wandb_watch_log: "gradients"
-  wandb_watch_log_freq: 1000
+  wandb_watch_log_freq: 1000

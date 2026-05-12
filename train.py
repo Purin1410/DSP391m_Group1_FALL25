@@ -8,7 +8,15 @@ from pytorch_lightning.loggers import WandbLogger as Logger
 import argparse
 from sconf import Config
 
+class MoreValidationCallback(pl.Callback):
+    def __init__(self, monitor="val_ExpRate"):
+        self.monitor = monitor
 
+    def on_validation_epoch_end(self, trainer, pl_module):
+        metric = trainer.callback_metrics.get(self.monitor)
+        if metric is not None:
+            if metric > 0.55:
+                trainer.check_val_every_n_epoch = 1
 
 def train(config):
     # Seed
@@ -45,10 +53,13 @@ def train(config):
     checkpoint_callback = ModelCheckpoint(save_top_k    = config.trainer.callbacks[1].init_args.save_top_k, 
                                             monitor     = config.trainer.callbacks[1].init_args.monitor,
                                             mode        = config.trainer.callbacks[1].init_args.mode,
-                                            filename    = config.trainer.callbacks[1].init_args.filename)
+                                            filename    = config.trainer.callbacks[1].init_args.filename,
+                                            dirpath     = config.trainer.default_root_dir,
+                                            )
 
-    # Curriculum module
     callback = [lr_callback, checkpoint_callback]
+
+    callback.append(MoreValidationCallback())
     
     if config.trainer.get("log_grad_norm", False):
         grad_norm_callback = GradNormCallback()
@@ -63,7 +74,7 @@ def train(config):
         logger                  = logger,
         deterministic           = config.trainer.deterministic,
         callbacks               = callback,
-        default_root_dir        = config.trainer.default_root_dir,
+        # default_root_dir        = config.trainer.default_root_dir,
         resume_from_checkpoint  = config.trainer.resume_from_checkpoint,
         replace_sampler_ddp=False,
     )
