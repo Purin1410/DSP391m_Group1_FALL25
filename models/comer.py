@@ -70,7 +70,7 @@ class CoMER(pl.LightningModule):
         )
 
     def forward(
-        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor
+        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor, rel_ids: torch.LongTensor = None
     ) -> FloatTensor:
         """run img and bi-tgt
 
@@ -92,7 +92,7 @@ class CoMER(pl.LightningModule):
         feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
         mask = torch.cat((mask, mask), dim=0)
 
-        out = self.decoder(feature, mask, tgt)
+        out = self.decoder(feature, mask, tgt, rel_ids=rel_ids)
 
         return out
 

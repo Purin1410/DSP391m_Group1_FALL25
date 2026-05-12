@@ -399,7 +399,7 @@ def multi_head_attention_forward(
                 f"expected (*, {tgt_len}, {src_len})"
             )
 
-        attn_output_weights = attn_output_weights + rel_bias.to(dtype=attn_output_weights.dtype)
+        attn_output_weights.add_(rel_bias.to(dtype=attn_output_weights.dtype))
 
     def mask_softmax_dropout(dots):
         if attn_mask is not None:

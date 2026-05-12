@@ -131,7 +131,7 @@ class Decoder(DecodeModel):
         return mask
 
     def forward(
-        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor
+        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor, rel_ids: Optional[LongTensor] = None
     ) -> FloatTensor:
         """generate output for tgt
 
@@ -154,10 +154,10 @@ class Decoder(DecodeModel):
         tgt_pad_mask = tgt == self.vocab_info.pad_id
 
         rel_bias = None
-        if self.use_tree_bias and self._tree_builder is not None:
-            # (B, L, L) relation ids -> (B, H, L, L) per-head bias
-            rel_ids = self._tree_builder.build(tgt)
-            rel_bias = self._tree_rel_bias(rel_ids)
+        if self.use_tree_bias and self._tree_rel_bias is not None:
+            if rel_ids is None:
+                rel_ids = self._tree_builder.build(tgt)
+            rel_bias = self._tree_rel_bias(rel_ids, flatten=True)
 
         tgt = self.word_embed(tgt)  # [b, l, d]
         tgt = self.pos_enc(tgt)  # [b, l, d]

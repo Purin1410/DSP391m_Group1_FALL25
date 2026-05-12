@@ -245,9 +245,10 @@ class TreeRelationBuilder:
 
         D = max_depth  # depth dimension for padded paths
 
-        # Build padded path tensor P and active mask A (on device for fast pairwise ops)
-        P = torch.full((B, L, D), fill_value=TYPE_ROOT, dtype=torch.long, device=device)
-        A = torch.zeros((B, L, D), dtype=torch.bool, device=device)
+        # Build padded path tensors on CPU first. This avoids thousands of tiny
+        # GPU allocations/copies from inside Python loops.
+        P_cpu = torch.full((B, L, D), fill_value=TYPE_ROOT, dtype=torch.long)
+        A_cpu = torch.zeros((B, L, D), dtype=torch.bool)
 
         for b in range(B):
             for i in range(L):
@@ -259,8 +260,15 @@ class TreeRelationBuilder:
                 if len(path) == 1 and path[0] == TYPE_ROOT:
                     continue
                 li = len(path)
-                P[b, i, :li] = torch.tensor(path, dtype=torch.long, device=device)
-                A[b, i, :li] = True
+                P_cpu[b, i, :li] = torch.as_tensor(path, dtype=torch.long)
+                A_cpu[b, i, :li] = True
+
+        if device.type == "cpu":
+            P = P_cpu
+            A = A_cpu
+        else:
+            P = P_cpu.to(device, non_blocking=True)
+            A = A_cpu.to(device, non_blocking=True)
 
         # lengths (B, L)
         lens = A.sum(dim=-1).to(torch.long)

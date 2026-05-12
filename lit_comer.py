@@ -45,7 +45,7 @@ class LitCoMER(pl.LightningModule):
         self.scheduler_monitor = self.scheduler_cfg.get("monitor", "val_ExpRate")
 
     def forward(
-        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor
+        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor, rel_ids: Optional[LongTensor] = None
     ) -> FloatTensor:
         """run img and bi-tgt
 
@@ -63,10 +63,10 @@ class LitCoMER(pl.LightningModule):
         FloatTensor
             [2b, l, vocab_size]
         """
-        return self.comer_model(img, img_mask, tgt)
+        return self.comer_model(img, img_mask, tgt, rel_ids=rel_ids)
 
     def training_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt)
+        out_hat = self(batch.imgs, batch.mask, batch.tgt, rel_ids=batch.rel_ids)
 
         loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
         self.log("train_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
@@ -74,7 +74,7 @@ class LitCoMER(pl.LightningModule):
         return loss
 
     def validation_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt)
+        out_hat = self(batch.imgs, batch.mask, batch.tgt, rel_ids=batch.rel_ids)
 
         loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
         self.log(
