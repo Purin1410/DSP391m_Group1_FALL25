@@ -186,22 +186,31 @@ class LitCoMER(pl.LightningModule):
         else:
             raise ValueError(f"Unknown optimizer: {name}")
 
-        sched_name = self.scheduler_use
-        if sched_name == "ReduceLROnPlateau":
-            reduce_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer=optimizer,
-                mode=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("mode", "max"),
-                factor=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("factor", 0.25),
-                patience=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("patience", 12),
-            )
-        else:
-            raise ValueError(f"Unknown scheduler: {sched_name}")
+        # sched_name = self.scheduler_use
+        # if sched_name == "ReduceLROnPlateau":
+        #     reduce_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        #         optimizer=optimizer,
+        #         mode=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("mode", "max"),
+        #         factor=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("factor", 0.25),
+        #         patience=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("patience", 12),
+        #     )
+        # else:
+        #     raise ValueError(f"Unknown scheduler: {sched_name}")
+        reduce_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr = 0.16,
+            # epochs = 300,
+            total_steps=250,
+            pct_start = 0.1,
+            div_factor=80.0, 
+            final_div_factor=1000000,
+        )
 
         scheduler = {
             "scheduler": reduce_scheduler,
             "monitor": self.scheduler_monitor,
             "interval": self.scheduler_interval,
-            "frequency": self.trainer.check_val_every_n_epoch,
+            "frequency": 1, #self.trainer.check_val_every_n_epoch,
             "strict": True,
         }
 
