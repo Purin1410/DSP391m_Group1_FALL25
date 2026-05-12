@@ -16,6 +16,8 @@ class MoreValidationCallback(pl.Callback):
 
     def on_validation_epoch_end(self, trainer, pl_module):
         metric = trainer.callback_metrics.get(self.monitor)
+        if trainer.current_epoch >= 220:
+            trainer.check_val_every_n_epoch = 2
         if metric is not None:
             if metric > 0.55:
                 trainer.check_val_every_n_epoch = 1
