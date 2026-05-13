@@ -1,5 +1,4 @@
 from __future__ import annotations
-from lightning_fabric.utilities import exceptions
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, Union, Set
 
