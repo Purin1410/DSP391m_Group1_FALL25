@@ -31,26 +31,44 @@ class MoreValidationCallback(pl.Callback):
             trainer.check_val_every_n_epoch = 25
 
 class RcloneUploadCallback(Callback):
-    def __init__(self, local_dir, remote_dir):
-        super().__init__()
-        self.local_dir = local_dir
-        self.remote_dir = remote_dir
+    """
+    Copy all checkpoint files from local_dir to remote_dir.
 
-    def on_epoch_end(self, trainer, pl_module):
+    Important:
+      - use rclone copy, not move, so local checkpoints stay available
+      - do not use --ignore-existing, so rewritten files can be updated remotely
+    """
+    def __init__(self, local_dir, remote_dir, every_n_epochs=1, upload_on_train_end=True):
+        super().__init__()
+        self.local_dir = str(local_dir)
+        self.remote_dir = remote_dir
+        self.every_n_epochs = every_n_epochs
+        self.upload_on_train_end = upload_on_train_end
+
+    def on_train_epoch_end(self, trainer, pl_module):
         if not trainer.is_global_zero:
             return
 
-        if trainer.current_epoch % trainer.check_val_every_n_epoch == 0:
+        if self.every_n_epochs is None:
+            return
+
+        epoch_num = trainer.current_epoch + 1
+        if epoch_num % self.every_n_epochs == 0:
+            self._rclone_upload()
+
+    def on_train_end(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
+
+        if self.upload_on_train_end:
             self._rclone_upload()
 
     def _rclone_upload(self):
         print("Uploading checkpoints to remote...")
         command = [
             "rclone",
-            "move",
+            "copy",
             "--update",
-            "--ignore-existing",
-            "--no-traverse",
             "--verbose",
             self.local_dir,
             self.remote_dir,
@@ -60,6 +78,136 @@ class RcloneUploadCallback(Callback):
         except subprocess.CalledProcessError as e:
             print(f"Error during upload: {e}")
         print("Upload completed.")
+
+
+class ConditionalLastCheckpointCallback(Callback):
+    """
+    Save one extra final checkpoint only when the last epoch metric is worse
+    than the best metric already saved by ModelCheckpoint.
+
+    For mode="max":
+      save last iff last_score < best_score
+
+    For mode="min":
+      save last iff last_score > best_score
+    """
+    def __init__(
+        self,
+        checkpoint_callback,
+        dirpath,
+        filename_template,
+        monitor="val_ExpRate",
+        mode="max",
+    ):
+        super().__init__()
+        self.checkpoint_callback = checkpoint_callback
+        self.dirpath = Path(dirpath)
+        self.filename_template = filename_template
+        self.monitor = monitor
+        self.mode = mode
+
+        self.last_score = None
+        self.last_metric_epoch = None
+        self.last_train_epoch = None
+
+    @staticmethod
+    def _to_float(value):
+        if value is None:
+            return None
+
+        try:
+            if hasattr(value, "detach"):
+                return float(value.detach().cpu().item())
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        metric = trainer.callback_metrics.get(self.monitor)
+        metric = self._to_float(metric)
+
+        if metric is None:
+            return
+
+        self.last_score = metric
+        self.last_metric_epoch = trainer.current_epoch
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        self.last_train_epoch = trainer.current_epoch
+
+    def _last_is_worse_than_best(self, last_score, best_score):
+        if self.mode == "min":
+            return last_score > best_score
+
+        return last_score < best_score
+
+    def _make_filename(self, epoch, score):
+        """
+        Try to reuse the same filename template you use for the best checkpoint.
+        Example template:
+          LiSRB_CROHME_seed7_{epoch}-{val_ExpRate:.4f}
+        """
+        try:
+            filename = self.filename_template.format(
+                epoch=epoch,
+                **{self.monitor: score},
+            )
+        except Exception:
+            prefix = self.filename_template.split("{", 1)[0]
+            safe_monitor = self.monitor.replace("/", "_")
+            filename = f"{prefix}last_epoch={epoch}-{safe_monitor}={score:.4f}"
+
+        if not filename.endswith(".ckpt"):
+            filename = f"{filename}.ckpt"
+
+        return filename
+
+    def on_train_end(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
+
+        best_score = self._to_float(self.checkpoint_callback.best_model_score)
+
+        if best_score is None:
+            print("[last-ckpt] Skip: best checkpoint score is not available.")
+            return
+
+        if self.last_score is None:
+            print(f"[last-ckpt] Skip: monitor metric '{self.monitor}' is not available.")
+            return
+
+        # This keeps the condition strict: only compare against the metric
+        # from the actual final train epoch. If the final epoch was not validated,
+        # we do not guess.
+        if self.last_train_epoch is not None and self.last_metric_epoch != self.last_train_epoch:
+            print(
+                "[last-ckpt] Skip: final epoch has no validation metric. "
+                f"last_metric_epoch={self.last_metric_epoch}, "
+                f"last_train_epoch={self.last_train_epoch}"
+            )
+            return
+
+        if not self._last_is_worse_than_best(self.last_score, best_score):
+            print(
+                "[last-ckpt] Skip: last checkpoint is not worse than best. "
+                f"last_score={self.last_score:.6f}, best_score={best_score:.6f}"
+            )
+            return
+
+        self.dirpath.mkdir(parents=True, exist_ok=True)
+
+        epoch = self.last_metric_epoch
+        filename = self._make_filename(epoch=epoch, score=self.last_score)
+        ckpt_path = self.dirpath / filename
+
+        trainer.save_checkpoint(str(ckpt_path))
+        print(
+            "[last-ckpt] Saved extra final checkpoint because last is worse than best:\n"
+            f"  last_score = {self.last_score:.6f}\n"
+            f"  best_score = {best_score:.6f}\n"
+            f"  path       = {ckpt_path}"
+        )
+
 
 def _join_rclone_path(remote_dir: str, rel_path: str) -> str:
     remote_dir = remote_dir.rstrip("/")
@@ -206,19 +354,33 @@ def train(config):
    # Callback
     lr_callback = LearningRateMonitor(logging_interval=config.trainer.callbacks[0].init_args.logging_interval)
 
-    checkpoint_callback = ModelCheckpoint(save_top_k    = config.trainer.callbacks[1].init_args.save_top_k, 
-                                            monitor     = config.trainer.callbacks[1].init_args.monitor,
-                                            mode        = config.trainer.callbacks[1].init_args.mode,
-                                            filename    = config.trainer.callbacks[1].init_args.filename,
-                                            dirpath     = config.trainer.default_root_dir,
-                                            )
+    ckpt_dir = config.trainer.default_root_dir
+    remote_dir = config.trainer.get("resume_remote_dir", "purin_gdrive:")
 
-    rclone_callback = RcloneUploadCallback(
-        local_dir = "checkpoints",
-        remote_dir = "purin_gdrive:"
+    checkpoint_callback = ModelCheckpoint(
+        save_top_k = config.trainer.callbacks[1].init_args.save_top_k,
+        monitor    = config.trainer.callbacks[1].init_args.monitor,
+        mode       = config.trainer.callbacks[1].init_args.mode,
+        filename   = config.trainer.callbacks[1].init_args.filename,
+        dirpath    = ckpt_dir,
     )
 
-    callback = [lr_callback, checkpoint_callback,rclone_callback]
+    conditional_last_callback = ConditionalLastCheckpointCallback(
+        checkpoint_callback = checkpoint_callback,
+        dirpath             = ckpt_dir,
+        filename_template   = config.trainer.callbacks[1].init_args.filename,
+        monitor             = config.trainer.callbacks[1].init_args.monitor,
+        mode                = config.trainer.callbacks[1].init_args.mode,
+    )
+
+    rclone_callback = RcloneUploadCallback(
+        local_dir           = ckpt_dir,
+        remote_dir          = remote_dir,
+        every_n_epochs      = config.trainer.get("rclone_every_n_epochs", 1),
+        upload_on_train_end = True,
+    )
+
+    callback = [lr_callback, checkpoint_callback, conditional_last_callback, rclone_callback]
 
     callback.append(MoreValidationCallback())
     
