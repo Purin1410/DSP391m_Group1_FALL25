@@ -81,7 +81,7 @@ def train(config):
                                             )
 
     rclone_callback = RcloneUploadCallback(
-        local_dir = config.trainer.default_root_dir,
+        local_dir = "checkpoints",
         remote_dir = "purin_gdrive:"
     )
 
