@@ -30,7 +30,7 @@ model:
   tree_bias_num_buckets: 16
   tree_bias_mode: full        # dist_only | type_only | full
   tree_bias_layers: all       # all | last1
-  tree_bias_rel_set: full     # supsub | supsub_frac | full
+  tree_bias_rel_set: core     # script | fraction | core
   # -------- encoder --------
   growth_rate: 24
   num_layers: 16

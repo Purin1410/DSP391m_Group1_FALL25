@@ -1,3 +1,4 @@
+from lightning_fabric.utilities import exceptions
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +13,6 @@ TYPE_SUP   = 1
 TYPE_SUB   = 2
 TYPE_NUM   = 3
 TYPE_DEN   = 4
-TYPE_OTHER = 5
 
 
 def distance_bucket_tensor(d: torch.Tensor, num_buckets: int) -> torch.Tensor:
@@ -43,7 +43,7 @@ class TreeRelationBuilder:
         id2tok: Union[Dict[int, str], Sequence[str]],
         pad_id: int = 0,
         num_buckets: int = 8,
-        type_size: int = 6,
+        type_size: int = 5,
         mode: str = "full",
         rel_set: str = "full",
     ) -> None:
@@ -51,7 +51,23 @@ class TreeRelationBuilder:
         self.num_buckets = int(num_buckets)
         self.type_size = int(type_size)
         self.mode = mode
-        self.rel_set = rel_set
+        rel_set_alias = {
+            "supsub": "script",
+            "numden": "fraction",
+            "frac": "fraction",
+            "supsub_frac": "core",
+            "script_frac": "core",
+            "supsub_numden": "core",
+            "full": "core",   
+            "all": "core",    
+        }
+        self.rel_set = rel_set_alias.get(rel_set, rel_set)
+        if self.rel_set not in {"script", "fraction", "core"}:
+            raise ValueError(
+                f"Unknown rel_set={rel_set!r}. "
+                "Expected one of: script, fraction, core "
+                "(aliases: supsub, numden, supsub_frac, full, all)."
+            )
 
         # Normalize id2tok to a list-like sequence
         if isinstance(id2tok, dict):
@@ -67,8 +83,8 @@ class TreeRelationBuilder:
         # Precompute special token ids once (FAST)
         self.sup_ids = self._find_all({"^", "^{"})
         self.sub_ids = self._find_all({"_", "_{"})
-        self.lbrace_ids = self._find_all({"{", "\\{", "\\lbrace"})
-        self.rbrace_ids = self._find_all({"}", "\\}", "\\rbrace"})
+        self.lbrace_ids = self._find_all({"{"})
+        self.rbrace_ids = self._find_all({"}"})
 
         self.frac_ids: Set[int] = self._find_all({"\\frac", "\\dfrac", "\\tfrac"})
 
@@ -171,7 +187,7 @@ class TreeRelationBuilder:
             # try matching literal brace tokens by string so contexts still work for patterns like ^ { ... }.
             if not has_braces:
                 tok = self.id2tok[tid] if tid < len(self.id2tok) else ""
-                if tok in ("{", "\\{", "\\lbrace"):
+                if tok in ("{", "\\lbrace"):
                     brace_depth += 1
                     if pending_ctx is not None:
                         ctx_stack.append(pending_ctx)
@@ -179,7 +195,7 @@ class TreeRelationBuilder:
                         pending_ctx = None
                     paths[pos] = tuple(ctx_stack) if ctx_stack else (TYPE_ROOT,)
                     continue
-                if tok in ("}", "\\}", "\\rbrace"):
+                if tok in ("}", "\\rbrace"):
                     if ctx_marks and brace_depth == ctx_marks[-1].start_depth:
                         closed = ctx_marks.pop().ctx
                         if ctx_stack:
@@ -195,13 +211,15 @@ class TreeRelationBuilder:
                     continue
 
             # content token:
-            if not has_braces and pending_ctx is not None:
-                # apply pending ctx to this single token (best-effort)
+            # If a pending context is not followed by a real grouping brace, apply it to
+            # this single content token. This handles valid forms like x ^ 2 or x _ i.
+            if pending_ctx is not None:
                 ctx_stack.append(pending_ctx)
                 paths[pos] = tuple(ctx_stack)
                 ctx_stack.pop()
 
-                # frac best-effort: NUM applies to one token then DEN applies to one token
+                # For an unbraced fraction, treat the next token after \frac as numerator
+                # and the following token as denominator. Braced fractions are handled above.
                 if pending_ctx == TYPE_NUM:
                     pending_ctx = TYPE_DEN
                     frac_mode = 2
@@ -308,14 +326,29 @@ class TreeRelationBuilder:
         ).squeeze(-1)                                                     # (B, L, L)
 
         # Rel set remap
-        if self.rel_set == "supsub":
-            # keep ROOT, SUP, SUB, map others (NUM-3, DEN-4, OTHER-5) to ROOT-0
-            ti = torch.where(ti > TYPE_SUB, torch.tensor(TYPE_ROOT, device=device), ti)
-            tj = torch.where(tj > TYPE_SUB, torch.tensor(TYPE_ROOT, device=device), tj)
-        elif self.rel_set == "supsub_frac":
-            # keep ROOT, SUP, SUB, NUM, DEN, map OTHER-5 to ROOT-0
-            ti = torch.where(ti == TYPE_OTHER, torch.tensor(TYPE_ROOT, device=device), ti)
-            tj = torch.where(tj == TYPE_OTHER, torch.tensor(TYPE_ROOT, device=device), tj)
+        # Rel set remap for ablation:
+        # - script:   keep ROOT/SUP/SUB only
+        # - fraction: keep ROOT/NUM/DEN only
+        # - core:     keep ROOT/SUP/SUB/NUM/DEN
+        root = torch.tensor(TYPE_ROOT, device=device)
+
+        if self.rel_set == "script":
+            keep_i = (ti == TYPE_ROOT) | (ti == TYPE_SUP) | (ti == TYPE_SUB)
+            keep_j = (tj == TYPE_ROOT) | (tj == TYPE_SUP) | (tj == TYPE_SUB)
+            ti = torch.where(keep_i, ti, root)
+            tj = torch.where(keep_j, tj, root)
+
+        elif self.rel_set == "fraction":
+            keep_i = (ti == TYPE_ROOT) | (ti == TYPE_NUM) | (ti == TYPE_DEN)
+            keep_j = (tj == TYPE_ROOT) | (tj == TYPE_NUM) | (tj == TYPE_DEN)
+            ti = torch.where(keep_i, ti, root)
+            tj = torch.where(keep_j, tj, root)
+
+        elif self.rel_set == "core":
+            pass
+
+        else:
+            raise ValueError(f"Unknown rel_set after normalization: {self.rel_set}")
 
         # relation id
         if self.mode == "dist_only":
