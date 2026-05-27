@@ -9,7 +9,7 @@ trainer:
     - class_path: pytorch_lightning.callbacks.ModelCheckpoint
       init_args:
         save_top_k: 1
-        monitor: None # val_ExpRate
+        monitor: val_ExpRate # val_ExpRate
         mode: max
         filename: '{epoch}-{val_ExpRate:.4f}'
   # gpus: 1
@@ -57,7 +57,7 @@ model:
     use: SGD # SGD, Adam, AdamW, Adadelta
     # init for SGD
     SGD:
-      lr: 0.12
+      lr: 0.24
       momentum: 0.9
       weight_decay: 0.0001
     # init for Adam
@@ -84,13 +84,18 @@ model:
       mode: 'max'
       factor: 0.25
       patience: 12
+    warmup:
+      enabled: true
+      interval: "step"
+      epochs: 1
+      steps: 555
 
 data:
   zipfile_path: crohme_data/data
   test_year: '2014'
   dictionary_txt: crohme_data/data/dictionary.txt
-  train_batch_size: 512
-  eval_batch_size: 512
+  train_batch_size: 8
+  eval_batch_size: 4
   num_workers: 4
   scale_aug: false
   cache_transforms: true
