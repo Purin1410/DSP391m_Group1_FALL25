@@ -47,7 +47,15 @@ class CROHMEDatamodule(pl.LightningDataModule):
 
         # Tree bias builder for precomputing rel_ids in DataLoader workers
         mcfg = self.config.model
-        if mcfg.get("use_tree_bias", True):
+        self.use_bidirectional = bool(mcfg.get("use_bidirectional", False))
+        self.use_tree_bias = bool(mcfg.get("use_tree_bias", True))
+        if self.use_bidirectional and self.use_tree_bias:
+            raise ValueError(
+                "model.use_tree_bias=true is only supported when "
+                "model.use_bidirectional=false. Disable tree bias for BTTR mode."
+            )
+
+        if self.use_tree_bias:
             self.tree_builder = TreeRelationBuilder(
                 id2tok=self.vocab.idx2word,
                 pad_id=self.vocab.PAD_IDX,
@@ -96,7 +104,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
             x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
 
-        from utils.utils import to_bi_tgt_out_from_padded
+        from utils.utils import to_bi_tgt_out_from_padded, to_l2r_tgt_out_from_padded
         
         lengths_x = [len(s) for s in seqs_y]
         max_len = max(lengths_x) if len(lengths_x) > 0 else 0
@@ -105,9 +113,14 @@ class CROHMEDatamodule(pl.LightningDataModule):
             labels[i, :lengths_x[i]] = torch.tensor(s, dtype=torch.long)
         lengths = torch.tensor(lengths_x, dtype=torch.long)
         
-        # Vectorized bidirectional tgt/out from padded labels (D1)
-        tgt, out = to_bi_tgt_out_from_padded(
-            labels, lengths,
+        target_builder = (
+            to_bi_tgt_out_from_padded
+            if self.use_bidirectional
+            else to_l2r_tgt_out_from_padded
+        )
+        tgt, out = target_builder(
+            labels,
+            lengths,
             sos_id=self.vocab.SOS_IDX,
             eos_id=self.vocab.EOS_IDX,
             pad_id=self.vocab.PAD_IDX,
@@ -265,4 +278,4 @@ class CROHMEDatamodule(pl.LightningDataModule):
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
             worker_init_fn      = self._get_worker_init_fn(),
-        )
+        )

@@ -28,6 +28,7 @@ class LitCoMER(pl.LightningModule):
         super().__init__()
         mcfg = config["model"]
         self.vocab_info = vocab_info
+        self.use_bidirectional = bool(mcfg.get("use_bidirectional", False))
         # Ignore vocab_info in save_hyperparameters to avoid deep serialization issues
         self.save_hyperparameters(ignore=["vocab_info"])
         
@@ -63,7 +64,7 @@ class LitCoMER(pl.LightningModule):
         tgt: LongTensor,
         rel_ids: Optional[LongTensor] = None
     ) -> FloatTensor:
-        """run img and bi-tgt
+        """run img and configured decoder targets
 
         Parameters
         ----------
@@ -72,12 +73,12 @@ class LitCoMER(pl.LightningModule):
         img_mask: LongTensor
             [b, h, w]
         tgt : LongTensor
-            [2b, l]
+            [b, l] in L2R mode, [2b, l] in bidirectional mode
 
         Returns
         -------
         FloatTensor
-            [2b, l, vocab_size]
+            [b, l, vocab_size] in L2R mode, [2b, l, vocab_size] in bidirectional mode
         """
         return self.comer_model(img, img_mask, tgt, rel_ids=rel_ids)
 
@@ -314,6 +315,7 @@ class LitCoMER(pl.LightningModule):
         img: FloatTensor, 
         mask: LongTensor,
     ) -> List[Hypothesis]:
+        # Backward-compatible name: CoMER routes to L2R or legacy BTTR by config.
         return self.comer_model.beam_search(img, mask, **self.hparams)
 
     def configure_optimizers(self):

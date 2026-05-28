@@ -118,9 +118,86 @@ class DecodeModel(nn.Module):
         -------
         List[Hypothesis]: [batch_size,]
         """
+        if getattr(self, "use_bidirectional", False):
+            return self._bidirectional_beam_search(
+                src=src,
+                src_mask=src_mask,
+                beam_size=beam_size,
+                max_len=max_len,
+                alpha=alpha,
+                early_stopping=early_stopping,
+                temperature=temperature,
+            )
+        return self._l2r_beam_search(
+            src=src,
+            src_mask=src_mask,
+            beam_size=beam_size,
+            max_len=max_len,
+            alpha=alpha,
+            early_stopping=early_stopping,
+            temperature=temperature,
+        )
+
+    def _l2r_beam_search(
+        self,
+        src: List[FloatTensor],
+        src_mask: List[LongTensor],
+        beam_size: int,
+        max_len: int,
+        alpha: float,
+        early_stopping: bool,
+        temperature: float,
+    ) -> List[Hypothesis]:
+        batch_size = src[0].shape[0]
+        input_ids = torch.full(
+            (batch_size, 1),
+            fill_value=self.vocab_info.sos_id,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        beam_scorer = BeamSearchScorer(
+            batch_size, beam_size, alpha, early_stopping, self.device, self.vocab_info
+        )
+        hyps, scores = self._beam_search(
+            src=list(src),
+            src_mask=list(src_mask),
+            input_ids=input_ids,
+            beam_scorer=beam_scorer,
+            beam_size=beam_size,
+            max_len=max_len,
+            temperature=temperature,
+        )
+
+        scores = rearrange(scores, "(b m) -> b m", b=batch_size)
+        best_scores, best_indices = torch.max(scores, dim=1)
+        batch_offsets = torch.arange(batch_size, dtype=torch.long, device=self.device) * beam_size
+        best_indices = batch_offsets + best_indices
+
+        best_indices_cpu = best_indices.cpu().tolist()
+        best_scores_cpu = best_scores.cpu().tolist()
+
+        ret: List[Hypothesis] = []
+        for idx, score in zip(best_indices_cpu, best_scores_cpu):
+            ret.append(Hypothesis(hyps[idx].cpu(), score, "l2r"))
+        return ret
+
+    def _bidirectional_beam_search(
+        self,
+        src: List[FloatTensor],
+        src_mask: List[LongTensor],
+        beam_size: int,
+        max_len: int,
+        alpha: float,
+        early_stopping: bool,
+        temperature: float,
+    ) -> List[Hypothesis]:
         batch_size = src[0].shape[0] * 2  # mul 2 for bi-direction
         batch_beam_size = batch_size * beam_size
         half_bb_size = batch_beam_size // 2
+
+        src = list(src)
+        src_mask = list(src_mask)
 
         for i in range(len(src)):
             # Bidirectional beam search: duplicate encoder features for l2r + r2l directions.

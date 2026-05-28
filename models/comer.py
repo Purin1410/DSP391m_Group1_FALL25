@@ -37,7 +37,13 @@ class CoMER(pl.LightningModule):
         cross_coverage      = mcfg.get("cross_coverage", True)
         self_coverage       = mcfg.get("self_coverage", True)
 
+        self.use_bidirectional = bool(mcfg.get("use_bidirectional", False))
         use_tree_bias       = mcfg.get("use_tree_bias", True)
+        if self.use_bidirectional and use_tree_bias:
+            raise ValueError(
+                "Tree relative bias is only supported for L2R mode. "
+                "Set model.use_tree_bias=false when model.use_bidirectional=true."
+            )
         tree_bias_num_buckets = mcfg.get("tree_bias_num_buckets", 16)
         tree_bias_mode      = mcfg.get("tree_bias_mode", "full")
         tree_bias_layers    = mcfg.get("tree_bias_layers", "all")
@@ -67,12 +73,13 @@ class CoMER(pl.LightningModule):
             tree_bias_mode=tree_bias_mode,
             tree_bias_layers=tree_bias_layers,
             tree_bias_rel_set=tree_bias_rel_set,
+            use_bidirectional=self.use_bidirectional,
         )
 
     def forward(
         self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor, rel_ids: torch.LongTensor = None
     ) -> FloatTensor:
-        """run img and bi-tgt
+        """run img and tgt
 
         Parameters
         ----------
@@ -81,16 +88,17 @@ class CoMER(pl.LightningModule):
         img_mask: LongTensor
             [b, h, w]
         tgt : LongTensor
-            [2b, l]
+            [b, l] in L2R mode, [2b, l] in bidirectional mode
 
         Returns
         -------
         FloatTensor
-            [2b, l, vocab_size]
+            [b, l, vocab_size] in L2R mode, [2b, l, vocab_size] in bidirectional mode
         """
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
-        feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
-        mask = torch.cat((mask, mask), dim=0)
+        if self.use_bidirectional:
+            feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
+            mask = torch.cat((mask, mask), dim=0)
 
         out = self.decoder(feature, mask, tgt, rel_ids=rel_ids)
 
@@ -107,7 +115,7 @@ class CoMER(pl.LightningModule):
         temperature: float,
         **kwargs,
     ) -> List[Hypothesis]:
-        """run bi-direction beam search for given img
+        """run configured beam search for given img
 
         Parameters
         ----------

@@ -60,9 +60,11 @@ class Decoder(DecodeModel):
         tree_bias_mode: str = "full",
         tree_bias_layers: str = "all",
         tree_bias_rel_set: str = "full",
+        use_bidirectional: bool = False,
     ):
         super().__init__()
         self.vocab_info = vocab_info
+        self.use_bidirectional = bool(use_bidirectional)
 
         self.word_embed = nn.Sequential(
             nn.Embedding(vocab_info.vocab_size, d_model), nn.LayerNorm(d_model)
@@ -91,6 +93,12 @@ class Decoder(DecodeModel):
         # -----------------------------
         self.use_tree_bias = bool(use_tree_bias)
         self.tree_bias_layers = tree_bias_layers
+
+        if self.use_bidirectional and self.use_tree_bias:
+            raise ValueError(
+                "Tree relative bias is L2R-only. Set use_tree_bias=false "
+                "when use_bidirectional=true."
+            )
 
         if self.use_tree_bias:
             if vocab_info is None or vocab_info.words is None or not hasattr(vocab_info.words, "idx2word"):
