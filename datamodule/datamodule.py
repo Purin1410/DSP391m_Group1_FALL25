@@ -7,7 +7,7 @@ from .utils import (build_train_dataset,
                     BucketedBatchSampler)
 from .vocab import Vocab
 from .utils import Batch
-from models.transformer.tree_bias import TreeRelationBuilder
+from models.transformer.tree_bias import TreeRelationBuilder, CausalR2LTreeRelationBuilder
 import torch
 
 class CROHMEDatamodule(pl.LightningDataModule):
@@ -49,22 +49,31 @@ class CROHMEDatamodule(pl.LightningDataModule):
         mcfg = self.config.model
         self.use_bidirectional = bool(mcfg.get("use_bidirectional", False))
         self.use_tree_bias = bool(mcfg.get("use_tree_bias", True))
-        if self.use_bidirectional and self.use_tree_bias:
-            raise ValueError(
-                "model.use_tree_bias=true is only supported when "
-                "model.use_bidirectional=false. Disable tree bias for BTTR mode."
-            )
 
         if self.use_tree_bias:
+            type_size = 6 if self.use_bidirectional else 5
             self.tree_builder = TreeRelationBuilder(
                 id2tok=self.vocab.idx2word,
                 pad_id=self.vocab.PAD_IDX,
                 num_buckets=mcfg.get("tree_bias_num_buckets", 16),
                 mode=mcfg.get("tree_bias_mode", "full"),
                 rel_set=mcfg.get("tree_bias_rel_set", "full"),
+                type_size=type_size,
             )
+            if self.use_bidirectional:
+                self.tree_builder_r2l = CausalR2LTreeRelationBuilder(
+                    id2tok=self.vocab.idx2word,
+                    pad_id=self.vocab.PAD_IDX,
+                    num_buckets=mcfg.get("tree_bias_num_buckets", 16),
+                    mode=mcfg.get("tree_bias_mode", "full"),
+                    rel_set=mcfg.get("tree_bias_rel_set", "full"),
+                    type_size=type_size,
+                )
+            else:
+                self.tree_builder_r2l = None
         else:
             self.tree_builder = None
+            self.tree_builder_r2l = None
         
         self.train_batch_sampler = None
         self.val_batch_sampler = None
@@ -129,7 +138,13 @@ class CROHMEDatamodule(pl.LightningDataModule):
         # Precompute tree relation IDs on CPU (offloaded to DataLoader workers)
         rel_ids = None
         if self.tree_builder is not None:
-            rel_ids = self.tree_builder.build(tgt)
+            if self.use_bidirectional:
+                half_B = tgt.shape[0] // 2
+                rel_ids_l2r = self.tree_builder.build(tgt[:half_B])
+                rel_ids_r2l = self.tree_builder_r2l.build(tgt[half_B:])
+                rel_ids = torch.cat([rel_ids_l2r, rel_ids_r2l], dim=0)
+            else:
+                rel_ids = self.tree_builder.build(tgt)
 
         return Batch(
             img_bases=fnames,

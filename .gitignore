@@ -6,6 +6,7 @@ __pycache__/
 
 .codex/*
 AGENTS.md
+README.md
 
 # C extensions
 *.so

@@ -26,11 +26,10 @@ trainer:
 model:
   d_model: 256
   # false: vanilla left-to-right transformer targets/search.
-  # true: legacy BTTR bidirectional targets/search. Tree bias is L2R-only,
-  # so set use_tree_bias=false before enabling bidirectional mode.
+  # true: legacy BTTR bidirectional targets/search. Bidirectional tree bias is supported.
   use_bidirectional: false
   # -------- tree relative bias --------
-  # Supported only when use_bidirectional=false.
+  # Supported in both L2R and bidirectional modes.
   use_tree_bias: true
   tree_bias_num_buckets: 16
   tree_bias_mode: full        # dist_only | type_only | full

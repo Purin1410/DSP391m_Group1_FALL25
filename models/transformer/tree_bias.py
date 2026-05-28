@@ -11,6 +11,11 @@ TYPE_SUP   = 1
 TYPE_SUB   = 2
 TYPE_NUM   = 3
 TYPE_DEN   = 4
+TYPE_UNK   = 5
+
+TYPE_SIZE_L2R = 5
+TYPE_SIZE_BIDIR = 6
+
 
 
 def distance_bucket_tensor(d: torch.Tensor, num_buckets: int) -> torch.Tensor:
@@ -393,3 +398,282 @@ class TreeRelativeBias(nn.Module):
             return bias.view(B * self.num_heads, L, L)
 
         return bias
+
+
+@dataclass
+class R2LContextNode:
+    relation_type: int
+    depth: int
+
+
+@dataclass
+class R2LOperand:
+    start_pos: int
+    end_pos: int
+    is_braced: bool
+
+
+@dataclass
+class R2LFrame:
+    start_pos: int
+    end_pos: Optional[int] = None
+    relation_type: int = TYPE_UNK
+    parent: Optional[R2LFrame] = None
+
+
+class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
+    """
+    Build causal relation ids (B, L, L) from LaTeX token ids (B, L)
+    for the R2L decoder direction. Crucially, the relation ids for query position i
+    and key position j (j <= i) are computed using only the prefix tokens[0..i]
+    to ensure causality and prevent future leakage of braces/operators.
+    """
+
+    def _paths_for_seq_ids(self, seq_ids: torch.Tensor) -> List[List[Tuple[int, ...]]]:
+        """
+        Convert one token-id sequence -> paths for each step.
+        Returns:
+            List of lists of tuples, where out[i][j] is the path of token j at step i.
+        """
+        L = int(seq_ids.numel())
+        all_step_paths = []
+        tokens = seq_ids.tolist()
+        has_braces = len(self.lbrace_ids) > 0 and len(self.rbrace_ids) > 0
+
+        for i in range(L):
+            prefix_tokens = tokens[:i + 1]
+            open_frames: List[R2LFrame] = []
+            closed_frames_at_level: Dict[int, List[R2LFrame]] = {}
+            all_frames: List[R2LFrame] = []
+            brace_depth = 0
+
+            for pos in range(i + 1):
+                tid = prefix_tokens[pos]
+                if tid == self.pad_id:
+                    continue
+
+                is_lbrace = False
+                is_rbrace = False
+                if has_braces:
+                    if tid in self.lbrace_ids:
+                        is_lbrace = True
+                    elif tid in self.rbrace_ids:
+                        is_rbrace = True
+                else:
+                    tok = self.id2tok[tid] if tid < len(self.id2tok) else ""
+                    if tok in ("{", "\\lbrace"):
+                        is_lbrace = True
+                    elif tok in ("}", "\\rbrace"):
+                        is_rbrace = True
+
+                if is_rbrace:
+                    brace_depth += 1
+                    parent = open_frames[-1] if open_frames else None
+                    frame = R2LFrame(start_pos=pos, parent=parent)
+                    open_frames.append(frame)
+                    all_frames.append(frame)
+                elif is_lbrace:
+                    if open_frames:
+                        closed = open_frames.pop()
+                        closed.end_pos = pos
+                        closed_frames_at_level.setdefault(brace_depth, []).append(closed)
+                    brace_depth = max(0, brace_depth - 1)
+                elif tid in self.sup_ids or tid in self.sub_ids:
+                    op_type = TYPE_SUP if tid in self.sup_ids else TYPE_SUB
+                    closed_list = closed_frames_at_level.get(brace_depth + 1, [])
+                    if closed_list:
+                        frame = closed_list[-1]
+                        frame.relation_type = op_type
+                        closed_list.pop()
+                    else:
+                        val_idx = pos - 1
+                        if val_idx >= 0 and tokens[val_idx] != self.pad_id:
+                            virtual_frame = R2LFrame(start_pos=val_idx - 1, parent=open_frames[-1] if open_frames else None)
+                            virtual_frame.end_pos = val_idx
+                            virtual_frame.relation_type = op_type
+                            all_frames.append(virtual_frame)
+                elif tid in self.frac_ids:
+                    closed_list = closed_frames_at_level.get(brace_depth + 1, [])
+                    if len(closed_list) >= 2:
+                        num_frame = closed_list[-1]
+                        den_frame = closed_list[-2]
+                        num_frame.relation_type = TYPE_NUM
+                        den_frame.relation_type = TYPE_DEN
+                        closed_list.pop()
+                        closed_list.pop()
+                    elif len(closed_list) == 1:
+                        num_frame = closed_list[-1]
+                        num_frame.relation_type = TYPE_NUM
+                        closed_list.pop()
+                        den_end_pos = num_frame.start_pos - 1
+                        if den_end_pos >= 0:
+                            found_den = None
+                            for frame in closed_list:
+                                if frame.end_pos == den_end_pos:
+                                    found_den = frame
+                                    break
+                            if found_den is not None:
+                                found_den.relation_type = TYPE_DEN
+                                closed_list.remove(found_den)
+                            elif tokens[den_end_pos] != self.pad_id:
+                                virtual_den = R2LFrame(start_pos=den_end_pos - 1, parent=open_frames[-1] if open_frames else None)
+                                virtual_den.end_pos = den_end_pos
+                                virtual_den.relation_type = TYPE_DEN
+                                all_frames.append(virtual_den)
+                    else:
+                        val_idx = pos - 1
+                        if val_idx >= 0 and tokens[val_idx] != self.pad_id:
+                            virtual_num = R2LFrame(start_pos=val_idx - 1, parent=open_frames[-1] if open_frames else None)
+                            virtual_num.end_pos = val_idx
+                            virtual_num.relation_type = TYPE_NUM
+                            all_frames.append(virtual_num)
+                            
+                            den_end_pos = val_idx - 1
+                            if den_end_pos >= 0 and tokens[den_end_pos] != self.pad_id:
+                                virtual_den = R2LFrame(start_pos=den_end_pos - 1, parent=open_frames[-1] if open_frames else None)
+                                virtual_den.end_pos = den_end_pos
+                                virtual_den.relation_type = TYPE_DEN
+                                all_frames.append(virtual_den)
+
+            step_paths = []
+            for j in range(i + 1):
+                if tokens[j] == self.pad_id:
+                    step_paths.append((TYPE_ROOT,))
+                    continue
+
+                enclosing = []
+                for frame in all_frames:
+                    end_val = frame.end_pos if frame.end_pos is not None else i
+                    if frame.start_pos < j <= end_val:
+                        enclosing.append(frame)
+
+                if not enclosing:
+                    step_paths.append((TYPE_ROOT,))
+                else:
+                    enclosing.sort(key=lambda f: f.start_pos)
+                    path = tuple(f.relation_type for f in enclosing)
+                    step_paths.append(path)
+
+            all_step_paths.append(step_paths)
+
+        return all_step_paths
+
+    def build(self, tgt_ids: torch.LongTensor) -> torch.LongTensor:
+        """
+        Build relation ids for decoder self-attention in R2L direction.
+
+        tgt_ids: (B, L) LongTensor on any device
+        rel_ids: (B, L, L) LongTensor on tgt_ids.device
+        """
+        if tgt_ids.dim() != 2:
+            raise ValueError(f"tgt_ids must be (B, L), got {tuple(tgt_ids.shape)}")
+
+        device = tgt_ids.device
+        B, L = tgt_ids.shape
+
+        tgt_cpu = tgt_ids.detach().to("cpu")
+
+        all_batch_paths = []
+        max_depth = 1
+        for b in range(B):
+            step_paths = self._paths_for_seq_ids(tgt_cpu[b])
+            all_batch_paths.append(step_paths)
+            for i in range(L):
+                for path in step_paths[i]:
+                    if len(path) > max_depth:
+                        max_depth = len(path)
+
+        D = max_depth
+
+        P_cpu = torch.full((B, L, L, D), fill_value=TYPE_ROOT, dtype=torch.long)
+        A_cpu = torch.zeros((B, L, L, D), dtype=torch.bool)
+
+        for b in range(B):
+            for i in range(L):
+                for j in range(i + 1):
+                    tid = int(tgt_cpu[b, j].item())
+                    if tid == self.pad_id:
+                        continue
+                    path = all_batch_paths[b][i][j]
+                    if len(path) == 1 and path[0] == TYPE_ROOT:
+                        continue
+                    li = len(path)
+                    P_cpu[b, i, j, :li] = torch.as_tensor(path, dtype=torch.long)
+                    A_cpu[b, i, j, :li] = True
+
+        if device.type == "cpu":
+            P = P_cpu
+            A = A_cpu
+        else:
+            P = P_cpu.to(device, non_blocking=True)
+            A = A_cpu.to(device, non_blocking=True)
+
+        lens = A.sum(dim=-1).to(torch.long)
+
+        idx = torch.arange(L, device=device)
+        P_diag = P[:, idx, idx, :]
+        A_diag = A[:, idx, idx, :]
+
+        Pi = P_diag.unsqueeze(2).expand(B, L, L, D)
+        Ai = A_diag.unsqueeze(2).expand(B, L, L, D)
+
+        Pj = P
+        Aj = A
+
+        eq = (Pi == Pj) & Ai & Aj
+        eqi = eq.to(torch.int16)
+        prefix = torch.cumprod(eqi, dim=-1)
+        lcp = prefix.sum(dim=-1).to(torch.long)
+
+        lens_i = lens[:, idx, idx].unsqueeze(2)
+        d = lens_i + lens - 2 * lcp
+        db = distance_bucket_tensor(d, self.num_buckets)
+
+        P_masked = torch.where(A, P, torch.full_like(P, TYPE_ROOT))
+        root_col = torch.full((B, L, L, 1), TYPE_ROOT, dtype=torch.long, device=device)
+        P_ext = torch.cat([P_masked, root_col], dim=-1)
+
+        Pi_masked = torch.where(Ai, Pi, torch.full_like(Pi, TYPE_ROOT))
+        Pi_ext = torch.cat([Pi_masked, root_col], dim=-1)
+
+        lcp_idx = torch.clamp(lcp, max=D).unsqueeze(-1)
+
+        ti = torch.gather(Pi_ext, dim=3, index=lcp_idx).squeeze(-1)
+        tj = torch.gather(P_ext, dim=3, index=lcp_idx).squeeze(-1)
+
+        root = torch.tensor(TYPE_ROOT, device=device)
+
+        if self.rel_set == "script":
+            keep_i = (ti == TYPE_ROOT) | (ti == TYPE_SUP) | (ti == TYPE_SUB) | (ti == TYPE_UNK)
+            keep_j = (tj == TYPE_ROOT) | (tj == TYPE_SUP) | (tj == TYPE_SUB) | (tj == TYPE_UNK)
+            ti = torch.where(keep_i, ti, root)
+            tj = torch.where(keep_j, tj, root)
+
+        elif self.rel_set == "fraction":
+            keep_i = (ti == TYPE_ROOT) | (ti == TYPE_NUM) | (ti == TYPE_DEN) | (ti == TYPE_UNK)
+            keep_j = (tj == TYPE_ROOT) | (tj == TYPE_NUM) | (tj == TYPE_DEN) | (tj == TYPE_UNK)
+            ti = torch.where(keep_i, ti, root)
+            tj = torch.where(keep_j, tj, root)
+
+        elif self.rel_set == "core":
+            pass
+        else:
+            raise ValueError(f"Unknown rel_set after normalization: {self.rel_set}")
+
+        if self.mode == "dist_only":
+            rid = db
+        elif self.mode == "type_only":
+            rid = ti * self.type_size + tj
+        else:
+            rid = db * (self.type_size * self.type_size) + ti * self.type_size + tj
+
+        is_pad = (tgt_ids == self.pad_id)
+        valid = (~is_pad).unsqueeze(2) & (~is_pad).unsqueeze(1)
+
+        causal = torch.tril(torch.ones(L, L, dtype=torch.bool, device=device)).unsqueeze(0)
+        valid = valid & causal
+
+        rid = rid.masked_fill(~valid, 0).to(torch.long)
+
+        return rid
+

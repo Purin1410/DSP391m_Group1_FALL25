@@ -13,7 +13,7 @@ from .transformer.transformer_decoder import (
     TransformerDecoder,
     TransformerDecoderLayer,
 )
-from .transformer.tree_bias import TreeRelationBuilder, TreeRelativeBias
+from .transformer.tree_bias import TreeRelationBuilder, TreeRelativeBias, CausalR2LTreeRelationBuilder
 from utils.generation_utils import DecodeModel
 
 
@@ -94,29 +94,38 @@ class Decoder(DecodeModel):
         self.use_tree_bias = bool(use_tree_bias)
         self.tree_bias_layers = tree_bias_layers
 
-        if self.use_bidirectional and self.use_tree_bias:
-            raise ValueError(
-                "Tree relative bias is L2R-only. Set use_tree_bias=false "
-                "when use_bidirectional=true."
-            )
-
         if self.use_tree_bias:
             if vocab_info is None or vocab_info.words is None or not hasattr(vocab_info.words, "idx2word"):
                 raise ValueError("Tree bias requires vocab_info.words.idx2word")
 
+            type_size = 6 if self.use_bidirectional else 5
             self._tree_builder = TreeRelationBuilder(
                 id2tok=vocab_info.words.idx2word,
                 pad_id=vocab_info.pad_id,
                 num_buckets=tree_bias_num_buckets,
                 mode=tree_bias_mode,
                 rel_set=tree_bias_rel_set,
+                type_size=type_size,
             )
+            if self.use_bidirectional:
+                self._tree_builder_r2l = CausalR2LTreeRelationBuilder(
+                    id2tok=vocab_info.words.idx2word,
+                    pad_id=vocab_info.pad_id,
+                    num_buckets=tree_bias_num_buckets,
+                    mode=tree_bias_mode,
+                    rel_set=tree_bias_rel_set,
+                    type_size=type_size,
+                )
+            else:
+                self._tree_builder_r2l = None
+
             self._tree_rel_bias = TreeRelativeBias(
                 num_heads=nhead,
                 num_relations=self._tree_builder.num_relations,
             )
         else:
             self._tree_builder = None
+            self._tree_builder_r2l = None
             self._tree_rel_bias = None
         # Causal mask cache: keyed by (device_type, device_index, dtype_str)
         # so CPU->CUDA or dtype changes don't reuse a stale/wrong-device mask.
@@ -137,6 +146,15 @@ class Decoder(DecodeModel):
         mask.triu_(1)  # zero out the lower diagonal
         self._causal_mask_cache[cache_key] = mask
         return mask
+
+    def _build_rel_ids_for_tgt(self, tgt: torch.LongTensor) -> torch.LongTensor:
+        if self.use_bidirectional:
+            half_B = tgt.shape[0] // 2
+            rel_ids_l2r = self._tree_builder.build(tgt[:half_B])
+            rel_ids_r2l = self._tree_builder_r2l.build(tgt[half_B:])
+            return torch.cat([rel_ids_l2r, rel_ids_r2l], dim=0)
+        else:
+            return self._tree_builder.build(tgt)
 
     def forward(
         self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor, rel_ids: Optional[LongTensor] = None
@@ -164,7 +182,7 @@ class Decoder(DecodeModel):
         rel_bias = None
         if self.use_tree_bias and self._tree_rel_bias is not None:
             if rel_ids is None:
-                rel_ids = self._tree_builder.build(tgt)
+                rel_ids = self._build_rel_ids_for_tgt(tgt)
             rel_bias = self._tree_rel_bias(rel_ids, flatten=True)
 
         tgt = self.word_embed(tgt)  # [b, l, d]

@@ -39,11 +39,6 @@ class CoMER(pl.LightningModule):
 
         self.use_bidirectional = bool(mcfg.get("use_bidirectional", False))
         use_tree_bias       = mcfg.get("use_tree_bias", True)
-        if self.use_bidirectional and use_tree_bias:
-            raise ValueError(
-                "Tree relative bias is only supported for L2R mode. "
-                "Set model.use_tree_bias=false when model.use_bidirectional=true."
-            )
         tree_bias_num_buckets = mcfg.get("tree_bias_num_buckets", 16)
         tree_bias_mode      = mcfg.get("tree_bias_mode", "full")
         tree_bias_layers    = mcfg.get("tree_bias_layers", "all")

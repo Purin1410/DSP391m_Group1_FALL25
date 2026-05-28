@@ -168,26 +168,27 @@ def test_tree_bias_mode_compatibility():
         out = decoder(src, src_mask, tgt)
     assert out.shape == (2, 4, 10)
 
-    try:
-        Decoder(
-            d_model=8,
-            nhead=2,
-            num_decoder_layers=1,
-            dim_feedforward=16,
-            dropout=0.0,
-            dc=4,
-            cross_coverage=False,
-            self_coverage=False,
-            vocab_info=vi,
-            use_tree_bias=True,
-            use_bidirectional=True,
-        )
-    except ValueError as exc:
-        assert "L2R-only" in str(exc)
-    else:
-        raise AssertionError("Bidirectional tree bias should be rejected")
+    # Verify that bidirectional tree bias is accepted and works
+    dec_bi = Decoder(
+        d_model=8,
+        nhead=2,
+        num_decoder_layers=1,
+        dim_feedforward=16,
+        dropout=0.0,
+        dc=4,
+        cross_coverage=False,
+        self_coverage=False,
+        vocab_info=vi,
+        use_tree_bias=True,
+        use_bidirectional=True,
+    )
+    dec_bi.eval()
+    tgt_bi = torch.tensor([[SOS, 3, 4, 7], [SOS, 8, 3, 9], [EOS, 7, 4, 3], [EOS, 9, 3, 8]], dtype=torch.long)
+    with torch.inference_mode():
+        out_bi = dec_bi(src.repeat(2, 1, 1, 1), src_mask.repeat(2, 1, 1), tgt_bi)
+    assert out_bi.shape == (4, 4, 10)
 
-    print("[PASS] Tree bias works in L2R and is rejected in bidirectional mode")
+    print("[PASS] Tree bias works in both L2R and bidirectional modes")
 
 def test_comer_forward_shapes_by_mode():
     print("Testing CoMER forward shapes by mode...")
