@@ -41,7 +41,7 @@ class L2RState:
     brace_depth: int
     pending_ctx: Optional[int]
     paths: List[Tuple[int, ...]]
-    rel_list: List[int]
+    rel_cpu: torch.LongTensor
     max_len: int
 
 
@@ -156,7 +156,7 @@ class TreeRelationBuilder:
             brace_depth=0,
             pending_ctx=None,
             paths=[],
-            rel_list=[0] * (max_len * max_len),
+            rel_cpu=torch.zeros((max_len, max_len), dtype=torch.long),
             max_len=max_len,
         )
         self.append_state(state, start_token)
@@ -259,18 +259,15 @@ class TreeRelationBuilder:
 
     def _fill_relation_row(self, state: L2RState, pos: int) -> None:
         pi = state.paths[pos]
-        row_offset = pos * state.max_len
         for j in range(pos + 1):
             if state.tokens[j] == self.pad_id:
                 continue
             pj = state.paths[j]
-            state.rel_list[row_offset + j] = self._pair_to_rel_id(pi, pj)
-            state.rel_list[j * state.max_len + pos] = self._pair_to_rel_id(pj, pi)
+            state.rel_cpu[pos, j] = self._pair_to_rel_id(pi, pj)
+            state.rel_cpu[j, pos] = self._pair_to_rel_id(pj, pi)
 
     def materialize_state(self, state: L2RState, cur_len: int, device: torch.device) -> torch.Tensor:
-        rel = torch.tensor(state.rel_list, dtype=torch.long).view(state.max_len, state.max_len)
-        rel_sliced = rel[:cur_len, :cur_len]
-        return rel_sliced.to(device, non_blocking=True)
+        return state.rel_cpu[:cur_len, :cur_len].to(device, non_blocking=True)
 
     def clone_state(self, state: L2RState) -> L2RState:
         return L2RState(
@@ -280,7 +277,7 @@ class TreeRelationBuilder:
             brace_depth=state.brace_depth,
             pending_ctx=state.pending_ctx,
             paths=state.paths.copy(),
-            rel_list=state.rel_list.copy(),
+            rel_cpu=state.rel_cpu.clone(),
             max_len=state.max_len,
         )
 
@@ -612,7 +609,7 @@ class R2LState:
     frames: List[Frame]
     path_refs: List[List[CtxNode]]
     paths: List[Tuple[int, ...]]
-    rel_list: List[int]
+    rel_cpu: torch.LongTensor
     max_len: int
 
 
@@ -633,7 +630,7 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
             frames=[Frame(node=None, operands=[], token_indices=[])],
             path_refs=[],
             paths=[],
-            rel_list=[0] * (max_len * max_len),
+            rel_cpu=torch.zeros((max_len, max_len), dtype=torch.long),
             max_len=max_len,
         )
         self.append_state(state, start_token)
@@ -721,19 +718,16 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
             fr.token_indices.append(i)
 
         pi = state.paths[i]
-        row_offset = i * state.max_len
         for j in range(i + 1):
             if state.tokens[j] == self.pad_id:
                 continue
             pj = state.paths[j]
-            state.rel_list[row_offset + j] = self._pair_to_rel_id(pi, pj)
+            state.rel_cpu[i, j] = self._pair_to_rel_id(pi, pj)
 
 
 
     def materialize_state(self, state: R2LState, cur_len: int, device: torch.device) -> torch.Tensor:
-        rel = torch.tensor(state.rel_list, dtype=torch.long).view(state.max_len, state.max_len)
-        rel_sliced = rel[:cur_len, :cur_len]
-        return rel_sliced.to(device, non_blocking=True)
+        return state.rel_cpu[:cur_len, :cur_len].to(device, non_blocking=True)
 
     def clone_state(self, state: R2LState) -> R2LState:
         node_map = {}
@@ -772,7 +766,7 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
             frames=new_frames,
             path_refs=new_path_refs,
             paths=state.paths.copy(),
-            rel_list=state.rel_list.copy(),
+            rel_cpu=state.rel_cpu.clone(),
             max_len=state.max_len,
         )
 

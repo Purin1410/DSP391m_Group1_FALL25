@@ -245,7 +245,7 @@ class TestTreeBiasR2L(unittest.TestCase):
             ["x", "_", "{", "i", "}"],
             ["x", "^", "{", "a", "_", "{", "i", "}", "}"],
             ["\\frac", "{", "a", "}", "{", "b", "}"],
-            ["\\frac", "{", "a", "^", "{", "2", "}", "}", "{", "b", "}"],
+            ["\\frac", "{", "x", "^", "{", "2", "}", "}", "{", "y", "_", "{", "i", "}", "}"],
             ["x", "+", "\\{", "y", "\\}"],
             ["x", "<pad>", "^", "{", "2", "}"],
         ]
@@ -320,6 +320,31 @@ class TestTreeBiasR2L(unittest.TestCase):
         self.assertTrue(torch.equal(rel1, exp1))
         self.assertTrue(torch.equal(rel2, exp2))
         self.assertFalse(torch.equal(rel1, rel2))
+
+        # Collect CtxNode ids to verify no sharing of CtxNodes
+        def get_all_node_ids(state):
+            node_ids = set()
+            for fr in state.frames:
+                if fr.node is not None:
+                    node_ids.add(id(fr.node))
+                for op in fr.operands:
+                    if op.node is not None:
+                        node_ids.add(id(op.node))
+                    for p in op.parent_nodes:
+                        if p is not None:
+                            node_ids.add(id(p))
+            for ref in state.path_refs:
+                for n in ref:
+                    if n is not None:
+                        node_ids.add(id(n))
+            return node_ids
+
+        parent_nodes = get_all_node_ids(parent)
+        beam1_nodes = get_all_node_ids(beam1)
+        beam2_nodes = get_all_node_ids(beam2)
+        self.assertTrue(parent_nodes.isdisjoint(beam1_nodes))
+        self.assertTrue(parent_nodes.isdisjoint(beam2_nodes))
+        self.assertTrue(beam1_nodes.isdisjoint(beam2_nodes))
 
     def test_decoder_equivalence(self):
         decoder = Decoder(

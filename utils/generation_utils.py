@@ -432,7 +432,10 @@ class DecodeModel(nn.Module):
             [b * beam_size]
         """
         b = tgt.shape[0]
-        out_hat = self.transform(src, src_mask, tgt) / temperature
+        rel_ids = None
+        if getattr(self, "use_tree_bias", False) and hasattr(self, "_build_rel_ids_for_tgt"):
+            rel_ids = self._build_rel_ids_for_tgt(tgt)
+        out_hat = self.transform(src, src_mask, tgt, rel_ids=rel_ids) / temperature
         loss = ce_loss(out_hat, out, ignore_idx=self.vocab_info.pad_id, reduction="none")
         loss = rearrange(loss, "(b l) -> b l", b=b)
         mask = tgt == self.vocab_info.pad_id
