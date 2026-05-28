@@ -401,33 +401,35 @@ class TreeRelativeBias(nn.Module):
 
 
 @dataclass
-class R2LContextNode:
-    relation_type: int
-    depth: int
+class CtxNode:
+    type: int
 
 
 @dataclass
-class R2LOperand:
-    start_pos: int
-    end_pos: int
-    is_braced: bool
+class Operand:
+    kind: str                 # "atom" or "group"
+    token_indices: List[int]  # for atom
+    node: Optional[CtxNode]   # for group
+    parent_nodes: List[CtxNode]
 
 
 @dataclass
-class R2LFrame:
-    start_pos: int
-    end_pos: Optional[int] = None
-    relation_type: int = TYPE_UNK
-    parent: Optional[R2LFrame] = None
+class Frame:
+    node: Optional[CtxNode]
+    operands: List[Operand]
+    token_indices: List[int]
 
 
 class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
     """
     Build causal relation ids (B, L, L) from LaTeX token ids (B, L)
-    for the R2L decoder direction. Crucially, the relation ids for query position i
-    and key position j (j <= i) are computed using only the prefix tokens[0..i]
-    to ensure causality and prevent future leakage of braces/operators.
+    for the R2L decoder direction. The relation ids are computed using a one-pass
+    incremental causal parser with mutable context nodes and cached path retrieval.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.boundary_ids = self._find_all({"<sos>", "<eos>"})
 
     def _paths_for_seq_ids(self, seq_ids: torch.Tensor) -> List[List[Tuple[int, ...]]]:
         """
@@ -436,127 +438,243 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
             List of lists of tuples, where out[i][j] is the path of token j at step i.
         """
         L = int(seq_ids.numel())
-        all_step_paths = []
         tokens = seq_ids.tolist()
-        has_braces = len(self.lbrace_ids) > 0 and len(self.rbrace_ids) > 0
+
+        frames = [Frame(node=None, operands=[], token_indices=[])]
+        path_refs = [[] for _ in range(L)]
+        paths = [None] * L
+
+        def current_path_nodes():
+            return [fr.node for fr in frames if fr.node is not None]
+
+        def materialize(nodes):
+            types = [n.type for n in nodes]
+            return (TYPE_ROOT,) if len(types) == 0 else tuple(types)
+
+        def resolve_operand(operand: Operand, target_type: int):
+            if operand.kind == "group":
+                if operand.node is not None:
+                    operand.node.type = target_type
+                    for idx in operand.token_indices:
+                        paths[idx] = materialize(path_refs[idx])
+            elif operand.kind == "atom":
+                node = CtxNode(target_type)
+                for idx in operand.token_indices:
+                    path_refs[idx].append(node)
+                    paths[idx] = materialize(path_refs[idx])
+
+        all_step_paths = []
 
         for i in range(L):
-            prefix_tokens = tokens[:i + 1]
-            open_frames: List[R2LFrame] = []
-            closed_frames_at_level: Dict[int, List[R2LFrame]] = {}
-            all_frames: List[R2LFrame] = []
-            brace_depth = 0
+            tid = tokens[i]
+            if tid == self.pad_id:
+                path_refs[i] = []
+                paths[i] = (TYPE_ROOT,)
+                step_paths = []
+                for j in range(i + 1):
+                    step_paths.append(paths[j])
+                all_step_paths.append(step_paths)
+                continue
 
-            for pos in range(i + 1):
-                tid = prefix_tokens[pos]
-                if tid == self.pad_id:
-                    continue
+            if tid in self.boundary_ids:
+                path_refs[i] = current_path_nodes()
 
-                is_lbrace = False
-                is_rbrace = False
-                if has_braces:
-                    if tid in self.lbrace_ids:
-                        is_lbrace = True
-                    elif tid in self.rbrace_ids:
-                        is_rbrace = True
-                else:
-                    tok = self.id2tok[tid] if tid < len(self.id2tok) else ""
-                    if tok in ("{", "\\lbrace"):
-                        is_lbrace = True
-                    elif tok in ("}", "\\rbrace"):
-                        is_rbrace = True
+            elif tid in self.rbrace_ids:
+                path_refs[i] = current_path_nodes()
+                node = CtxNode(TYPE_UNK)
+                frames.append(Frame(node=node, operands=[], token_indices=[]))
 
-                if is_rbrace:
-                    brace_depth += 1
-                    parent = open_frames[-1] if open_frames else None
-                    frame = R2LFrame(start_pos=pos, parent=parent)
-                    open_frames.append(frame)
-                    all_frames.append(frame)
-                elif is_lbrace:
-                    if open_frames:
-                        closed = open_frames.pop()
-                        closed.end_pos = pos
-                        closed_frames_at_level.setdefault(brace_depth, []).append(closed)
-                    brace_depth = max(0, brace_depth - 1)
-                elif tid in self.sup_ids or tid in self.sub_ids:
-                    op_type = TYPE_SUP if tid in self.sup_ids else TYPE_SUB
-                    closed_list = closed_frames_at_level.get(brace_depth + 1, [])
-                    if closed_list:
-                        frame = closed_list[-1]
-                        frame.relation_type = op_type
-                        closed_list.pop()
-                    else:
-                        val_idx = pos - 1
-                        if val_idx >= 0 and tokens[val_idx] != self.pad_id:
-                            virtual_frame = R2LFrame(start_pos=val_idx - 1, parent=open_frames[-1] if open_frames else None)
-                            virtual_frame.end_pos = val_idx
-                            virtual_frame.relation_type = op_type
-                            all_frames.append(virtual_frame)
-                elif tid in self.frac_ids:
-                    closed_list = closed_frames_at_level.get(brace_depth + 1, [])
-                    if len(closed_list) >= 2:
-                        num_frame = closed_list[-1]
-                        den_frame = closed_list[-2]
-                        num_frame.relation_type = TYPE_NUM
-                        den_frame.relation_type = TYPE_DEN
-                        closed_list.pop()
-                        closed_list.pop()
-                    elif len(closed_list) == 1:
-                        num_frame = closed_list[-1]
-                        num_frame.relation_type = TYPE_NUM
-                        closed_list.pop()
-                        den_end_pos = num_frame.start_pos - 1
-                        if den_end_pos >= 0:
-                            found_den = None
-                            for frame in closed_list:
-                                if frame.end_pos == den_end_pos:
-                                    found_den = frame
-                                    break
-                            if found_den is not None:
-                                found_den.relation_type = TYPE_DEN
-                                closed_list.remove(found_den)
-                            elif tokens[den_end_pos] != self.pad_id:
-                                virtual_den = R2LFrame(start_pos=den_end_pos - 1, parent=open_frames[-1] if open_frames else None)
-                                virtual_den.end_pos = den_end_pos
-                                virtual_den.relation_type = TYPE_DEN
-                                all_frames.append(virtual_den)
-                    else:
-                        val_idx = pos - 1
-                        if val_idx >= 0 and tokens[val_idx] != self.pad_id:
-                            virtual_num = R2LFrame(start_pos=val_idx - 1, parent=open_frames[-1] if open_frames else None)
-                            virtual_num.end_pos = val_idx
-                            virtual_num.relation_type = TYPE_NUM
-                            all_frames.append(virtual_num)
-                            
-                            den_end_pos = val_idx - 1
-                            if den_end_pos >= 0 and tokens[den_end_pos] != self.pad_id:
-                                virtual_den = R2LFrame(start_pos=den_end_pos - 1, parent=open_frames[-1] if open_frames else None)
-                                virtual_den.end_pos = den_end_pos
-                                virtual_den.relation_type = TYPE_DEN
-                                all_frames.append(virtual_den)
+            elif tid in self.lbrace_ids:
+                path_refs[i] = current_path_nodes()
+                if len(frames) > 1:
+                    closed = frames.pop()
+                    closed.token_indices.append(i)
+                    frames[-1].operands.append(
+                        Operand(
+                            kind="group",
+                            token_indices=closed.token_indices,
+                            node=closed.node,
+                            parent_nodes=current_path_nodes(),
+                        )
+                    )
+
+            elif tid in self.sup_ids or tid in self.sub_ids:
+                path_refs[i] = current_path_nodes()
+                op_type = TYPE_SUP if tid in self.sup_ids else TYPE_SUB
+                if len(frames[-1].operands) > 0:
+                    resolve_operand(frames[-1].operands[-1], op_type)
+
+            elif tid in self.frac_ids:
+                path_refs[i] = current_path_nodes()
+                if len(frames[-1].operands) >= 2:
+                    resolve_operand(frames[-1].operands[-1], TYPE_NUM)
+                    resolve_operand(frames[-1].operands[-2], TYPE_DEN)
+                elif len(frames[-1].operands) == 1:
+                    resolve_operand(frames[-1].operands[-1], TYPE_NUM)
+
+            else:
+                path_refs[i] = current_path_nodes()
+                frames[-1].operands.append(
+                    Operand(
+                        kind="atom",
+                        token_indices=[i],
+                        node=None,
+                        parent_nodes=current_path_nodes(),
+                    )
+                )
+
+            paths[i] = materialize(path_refs[i])
+            for fr in frames[1:]:
+                fr.token_indices.append(i)
 
             step_paths = []
             for j in range(i + 1):
-                if tokens[j] == self.pad_id:
-                    step_paths.append((TYPE_ROOT,))
-                    continue
-
-                enclosing = []
-                for frame in all_frames:
-                    end_val = frame.end_pos if frame.end_pos is not None else i
-                    if frame.start_pos < j <= end_val:
-                        enclosing.append(frame)
-
-                if not enclosing:
-                    step_paths.append((TYPE_ROOT,))
-                else:
-                    enclosing.sort(key=lambda f: f.start_pos)
-                    path = tuple(f.relation_type for f in enclosing)
-                    step_paths.append(path)
-
+                step_paths.append(paths[j])
             all_step_paths.append(step_paths)
 
         return all_step_paths
+
+    def _build_one(self, seq_ids: torch.Tensor) -> torch.Tensor:
+        L = int(seq_ids.numel())
+        tokens = seq_ids.tolist()
+
+        frames = [Frame(node=None, operands=[], token_indices=[])]
+        path_refs = [[] for _ in range(L)]
+        paths = [None] * L
+        rel_list = [0] * (L * L)
+
+        def current_path_nodes():
+            return [fr.node for fr in frames if fr.node is not None]
+
+        def materialize(nodes):
+            types = [n.type for n in nodes]
+            return (TYPE_ROOT,) if len(types) == 0 else tuple(types)
+
+        def resolve_operand(operand: Operand, target_type: int):
+            if operand.kind == "group":
+                if operand.node is not None:
+                    operand.node.type = target_type
+                    for idx in operand.token_indices:
+                        paths[idx] = materialize(path_refs[idx])
+            elif operand.kind == "atom":
+                node = CtxNode(target_type)
+                for idx in operand.token_indices:
+                    path_refs[idx].append(node)
+                    paths[idx] = materialize(path_refs[idx])
+
+        rel_cache = {}
+
+        def pair_to_rel_id(pi, pj):
+            pi_clean = () if pi == (TYPE_ROOT,) else pi
+            pj_clean = () if pj == (TYPE_ROOT,) else pj
+
+            min_l = min(len(pi_clean), len(pj_clean))
+            lcp = 0
+            while lcp < min_l and pi_clean[lcp] == pj_clean[lcp]:
+                lcp += 1
+
+            d = len(pi_clean) + len(pj_clean) - 2 * lcp
+            db = min(max(d, 0), self.num_buckets - 1)
+
+            ti = pi_clean[lcp] if lcp < len(pi_clean) else TYPE_ROOT
+            tj = pj_clean[lcp] if lcp < len(pj_clean) else TYPE_ROOT
+
+            if self.rel_set == "script":
+                keep_i = (ti == TYPE_ROOT) or (ti == TYPE_SUP) or (ti == TYPE_SUB) or (ti == TYPE_UNK)
+                keep_j = (tj == TYPE_ROOT) or (tj == TYPE_SUP) or (tj == TYPE_SUB) or (tj == TYPE_UNK)
+                if not keep_i:
+                    ti = TYPE_ROOT
+                if not keep_j:
+                    tj = TYPE_ROOT
+            elif self.rel_set == "fraction":
+                keep_i = (ti == TYPE_ROOT) or (ti == TYPE_NUM) or (ti == TYPE_DEN) or (ti == TYPE_UNK)
+                keep_j = (tj == TYPE_ROOT) or (tj == TYPE_NUM) or (tj == TYPE_DEN) or (tj == TYPE_UNK)
+                if not keep_i:
+                    ti = TYPE_ROOT
+                if not keep_j:
+                    tj = TYPE_ROOT
+            elif self.rel_set == "core":
+                pass
+
+            if self.mode == "dist_only":
+                return db
+            elif self.mode == "type_only":
+                return ti * self.type_size + tj
+            else:
+                return db * (self.type_size * self.type_size) + ti * self.type_size + tj
+
+        for i in range(L):
+            tid = tokens[i]
+            if tid == self.pad_id:
+                path_refs[i] = []
+                paths[i] = (TYPE_ROOT,)
+                continue
+
+            if tid in self.boundary_ids:
+                path_refs[i] = current_path_nodes()
+
+            elif tid in self.rbrace_ids:
+                path_refs[i] = current_path_nodes()
+                node = CtxNode(TYPE_UNK)
+                frames.append(Frame(node=node, operands=[], token_indices=[]))
+
+            elif tid in self.lbrace_ids:
+                path_refs[i] = current_path_nodes()
+                if len(frames) > 1:
+                    closed = frames.pop()
+                    closed.token_indices.append(i)
+                    frames[-1].operands.append(
+                        Operand(
+                            kind="group",
+                            token_indices=closed.token_indices,
+                            node=closed.node,
+                            parent_nodes=current_path_nodes(),
+                        )
+                    )
+
+            elif tid in self.sup_ids or tid in self.sub_ids:
+                path_refs[i] = current_path_nodes()
+                op_type = TYPE_SUP if tid in self.sup_ids else TYPE_SUB
+                if len(frames[-1].operands) > 0:
+                    resolve_operand(frames[-1].operands[-1], op_type)
+
+            elif tid in self.frac_ids:
+                path_refs[i] = current_path_nodes()
+                if len(frames[-1].operands) >= 2:
+                    resolve_operand(frames[-1].operands[-1], TYPE_NUM)
+                    resolve_operand(frames[-1].operands[-2], TYPE_DEN)
+                elif len(frames[-1].operands) == 1:
+                    resolve_operand(frames[-1].operands[-1], TYPE_NUM)
+
+            else:
+                path_refs[i] = current_path_nodes()
+                frames[-1].operands.append(
+                    Operand(
+                        kind="atom",
+                        token_indices=[i],
+                        node=None,
+                        parent_nodes=current_path_nodes(),
+                    )
+                )
+
+            paths[i] = materialize(path_refs[i])
+            for fr in frames[1:]:
+                fr.token_indices.append(i)
+
+            pi = paths[i]
+            row_offset = i * L
+            for j in range(i + 1):
+                if tokens[j] == self.pad_id:
+                    continue
+                pj = paths[j]
+                key = (pi, pj)
+                rid = rel_cache.get(key)
+                if rid is None:
+                    rid = pair_to_rel_id(pi, pj)
+                    rel_cache[key] = rid
+                rel_list[row_offset + j] = rid
+
+        return torch.tensor(rel_list, dtype=torch.long).view(L, L)
 
     def build(self, tgt_ids: torch.LongTensor) -> torch.LongTensor:
         """
@@ -572,108 +690,14 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
         B, L = tgt_ids.shape
 
         tgt_cpu = tgt_ids.detach().to("cpu")
-
-        all_batch_paths = []
-        max_depth = 1
-        for b in range(B):
-            step_paths = self._paths_for_seq_ids(tgt_cpu[b])
-            all_batch_paths.append(step_paths)
-            for i in range(L):
-                for path in step_paths[i]:
-                    if len(path) > max_depth:
-                        max_depth = len(path)
-
-        D = max_depth
-
-        P_cpu = torch.full((B, L, L, D), fill_value=TYPE_ROOT, dtype=torch.long)
-        A_cpu = torch.zeros((B, L, L, D), dtype=torch.bool)
+        out = torch.zeros((B, L, L), dtype=torch.long)
 
         for b in range(B):
-            for i in range(L):
-                for j in range(i + 1):
-                    tid = int(tgt_cpu[b, j].item())
-                    if tid == self.pad_id:
-                        continue
-                    path = all_batch_paths[b][i][j]
-                    if len(path) == 1 and path[0] == TYPE_ROOT:
-                        continue
-                    li = len(path)
-                    P_cpu[b, i, j, :li] = torch.as_tensor(path, dtype=torch.long)
-                    A_cpu[b, i, j, :li] = True
+            out[b] = self._build_one(tgt_cpu[b])
 
         if device.type == "cpu":
-            P = P_cpu
-            A = A_cpu
+            return out
         else:
-            P = P_cpu.to(device, non_blocking=True)
-            A = A_cpu.to(device, non_blocking=True)
+            return out.to(device, non_blocking=True)
 
-        lens = A.sum(dim=-1).to(torch.long)
-
-        idx = torch.arange(L, device=device)
-        P_diag = P[:, idx, idx, :]
-        A_diag = A[:, idx, idx, :]
-
-        Pi = P_diag.unsqueeze(2).expand(B, L, L, D)
-        Ai = A_diag.unsqueeze(2).expand(B, L, L, D)
-
-        Pj = P
-        Aj = A
-
-        eq = (Pi == Pj) & Ai & Aj
-        eqi = eq.to(torch.int16)
-        prefix = torch.cumprod(eqi, dim=-1)
-        lcp = prefix.sum(dim=-1).to(torch.long)
-
-        lens_i = lens[:, idx, idx].unsqueeze(2)
-        d = lens_i + lens - 2 * lcp
-        db = distance_bucket_tensor(d, self.num_buckets)
-
-        P_masked = torch.where(A, P, torch.full_like(P, TYPE_ROOT))
-        root_col = torch.full((B, L, L, 1), TYPE_ROOT, dtype=torch.long, device=device)
-        P_ext = torch.cat([P_masked, root_col], dim=-1)
-
-        Pi_masked = torch.where(Ai, Pi, torch.full_like(Pi, TYPE_ROOT))
-        Pi_ext = torch.cat([Pi_masked, root_col], dim=-1)
-
-        lcp_idx = torch.clamp(lcp, max=D).unsqueeze(-1)
-
-        ti = torch.gather(Pi_ext, dim=3, index=lcp_idx).squeeze(-1)
-        tj = torch.gather(P_ext, dim=3, index=lcp_idx).squeeze(-1)
-
-        root = torch.tensor(TYPE_ROOT, device=device)
-
-        if self.rel_set == "script":
-            keep_i = (ti == TYPE_ROOT) | (ti == TYPE_SUP) | (ti == TYPE_SUB) | (ti == TYPE_UNK)
-            keep_j = (tj == TYPE_ROOT) | (tj == TYPE_SUP) | (tj == TYPE_SUB) | (tj == TYPE_UNK)
-            ti = torch.where(keep_i, ti, root)
-            tj = torch.where(keep_j, tj, root)
-
-        elif self.rel_set == "fraction":
-            keep_i = (ti == TYPE_ROOT) | (ti == TYPE_NUM) | (ti == TYPE_DEN) | (ti == TYPE_UNK)
-            keep_j = (tj == TYPE_ROOT) | (tj == TYPE_NUM) | (tj == TYPE_DEN) | (tj == TYPE_UNK)
-            ti = torch.where(keep_i, ti, root)
-            tj = torch.where(keep_j, tj, root)
-
-        elif self.rel_set == "core":
-            pass
-        else:
-            raise ValueError(f"Unknown rel_set after normalization: {self.rel_set}")
-
-        if self.mode == "dist_only":
-            rid = db
-        elif self.mode == "type_only":
-            rid = ti * self.type_size + tj
-        else:
-            rid = db * (self.type_size * self.type_size) + ti * self.type_size + tj
-
-        is_pad = (tgt_ids == self.pad_id)
-        valid = (~is_pad).unsqueeze(2) & (~is_pad).unsqueeze(1)
-
-        causal = torch.tril(torch.ones(L, L, dtype=torch.bool, device=device)).unsqueeze(0)
-        valid = valid & causal
-
-        rid = rid.masked_fill(~valid, 0).to(torch.long)
-
-        return rid
 
