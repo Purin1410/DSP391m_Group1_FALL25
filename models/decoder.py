@@ -211,8 +211,8 @@ class Decoder(DecodeModel):
 
 
     def transform(
-        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
+        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor, rel_ids: Optional[LongTensor] = None
     ) -> FloatTensor:
         assert len(src) == 1 and len(src_mask) == 1
-        return self(src[0], src_mask[0], input_ids)
+        return self(src[0], src_mask[0], input_ids, rel_ids=rel_ids)
 

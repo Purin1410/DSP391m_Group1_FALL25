@@ -8,7 +8,7 @@ No dataset, checkpoint, or GPU required.
 import sys
 import torch
 import torch.nn as nn
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from torch import FloatTensor, LongTensor
 
 from utils.vocab_info import VocabInfo
@@ -39,7 +39,9 @@ class DummyDecodeModel(DecodeModel):
         self.embed = nn.Embedding(vocab_info.vocab_size, d_model)
         self.proj = nn.Linear(d_model, vocab_info.vocab_size)
 
-    def transform(self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor) -> FloatTensor:
+    def transform(
+        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor, rel_ids: Optional[LongTensor] = None
+    ) -> FloatTensor:
         # Full-prefix transform
         if self.first_src_batch is None:
             self.first_src_batch = src[0].shape[0]

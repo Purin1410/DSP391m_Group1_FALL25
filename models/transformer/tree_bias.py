@@ -33,6 +33,18 @@ class _CtxMark:
     start_depth: int
 
 
+@dataclass
+class L2RState:
+    tokens: List[int]
+    ctx_stack: List[int]
+    ctx_marks: List[_CtxMark]
+    brace_depth: int
+    pending_ctx: Optional[int]
+    paths: List[Tuple[int, ...]]
+    rel_list: List[int]
+    max_len: int
+
+
 class TreeRelationBuilder:
     """
     Build relation ids (B, L, L) from LaTeX token ids (B, L) using a simple
@@ -98,6 +110,180 @@ class TreeRelationBuilder:
             self.num_relations = self.type_size * self.type_size
         else: # "full"
             self.num_relations = self.num_buckets * (self.type_size * self.type_size)
+
+    def _pair_to_rel_id(self, pi: Tuple[int, ...], pj: Tuple[int, ...]) -> int:
+        pi_clean = () if pi == (TYPE_ROOT,) else pi
+        pj_clean = () if pj == (TYPE_ROOT,) else pj
+
+        min_l = min(len(pi_clean), len(pj_clean))
+        lcp = 0
+        while lcp < min_l and pi_clean[lcp] == pj_clean[lcp]:
+            lcp += 1
+
+        d = len(pi_clean) + len(pj_clean) - 2 * lcp
+        db = min(max(d, 0), self.num_buckets - 1)
+
+        ti = pi_clean[lcp] if lcp < len(pi_clean) else TYPE_ROOT
+        tj = pj_clean[lcp] if lcp < len(pj_clean) else TYPE_ROOT
+
+        if self.rel_set == "script":
+            keep_i = (ti == TYPE_ROOT) or (ti == TYPE_SUP) or (ti == TYPE_SUB) or (ti == TYPE_UNK)
+            keep_j = (tj == TYPE_ROOT) or (tj == TYPE_SUP) or (tj == TYPE_SUB) or (tj == TYPE_UNK)
+            if not keep_i:
+                ti = TYPE_ROOT
+            if not keep_j:
+                tj = TYPE_ROOT
+        elif self.rel_set == "fraction":
+            keep_i = (ti == TYPE_ROOT) or (ti == TYPE_NUM) or (ti == TYPE_DEN) or (ti == TYPE_UNK)
+            keep_j = (tj == TYPE_ROOT) or (tj == TYPE_NUM) or (tj == TYPE_DEN) or (tj == TYPE_UNK)
+            if not keep_i:
+                ti = TYPE_ROOT
+            if not keep_j:
+                tj = TYPE_ROOT
+
+        if self.mode == "dist_only":
+            return db
+        elif self.mode == "type_only":
+            return ti * self.type_size + tj
+        else:
+            return db * (self.type_size * self.type_size) + ti * self.type_size + tj
+
+    def init_state(self, max_len: int, start_token: int) -> L2RState:
+        state = L2RState(
+            tokens=[],
+            ctx_stack=[],
+            ctx_marks=[],
+            brace_depth=0,
+            pending_ctx=None,
+            paths=[],
+            rel_list=[0] * (max_len * max_len),
+            max_len=max_len,
+        )
+        self.append_state(state, start_token)
+        return state
+
+    def append_state(self, state: L2RState, token_id: int) -> None:
+        tid = int(token_id)
+        state.tokens.append(tid)
+        pos = len(state.tokens) - 1
+
+        if tid == self.pad_id:
+            state.paths.append((TYPE_ROOT,))
+            return
+
+        has_braces = len(self.lbrace_ids) > 0 and len(self.rbrace_ids) > 0
+
+        if tid in self.frac_ids:
+            state.pending_ctx = TYPE_NUM
+            state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+            self._fill_relation_row(state, pos)
+            return
+
+        if tid in self.sup_ids:
+            state.pending_ctx = TYPE_SUP
+            state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+            self._fill_relation_row(state, pos)
+            return
+        if tid in self.sub_ids:
+            state.pending_ctx = TYPE_SUB
+            state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+            self._fill_relation_row(state, pos)
+            return
+
+        if has_braces and tid in self.lbrace_ids:
+            state.brace_depth += 1
+            if state.pending_ctx is not None:
+                state.ctx_stack.append(state.pending_ctx)
+                state.ctx_marks.append(_CtxMark(ctx=state.pending_ctx, start_depth=state.brace_depth))
+                state.pending_ctx = None
+            state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+            self._fill_relation_row(state, pos)
+            return
+
+        if has_braces and tid in self.rbrace_ids:
+            if state.ctx_marks and state.brace_depth == state.ctx_marks[-1].start_depth:
+                closed = state.ctx_marks.pop().ctx
+                if state.ctx_stack:
+                    state.ctx_stack.pop()
+                if closed == TYPE_NUM:
+                    state.pending_ctx = TYPE_DEN
+                elif closed == TYPE_DEN:
+                    state.pending_ctx = None
+            state.brace_depth = max(0, state.brace_depth - 1)
+            state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+            self._fill_relation_row(state, pos)
+            return
+
+        if not has_braces:
+            tok = self.id2tok[tid] if tid < len(self.id2tok) else ""
+            if tok in ("{", "\\lbrace"):
+                state.brace_depth += 1
+                if state.pending_ctx is not None:
+                    state.ctx_stack.append(state.pending_ctx)
+                    state.ctx_marks.append(_CtxMark(ctx=state.pending_ctx, start_depth=state.brace_depth))
+                    state.pending_ctx = None
+                state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+                self._fill_relation_row(state, pos)
+                return
+            if tok in ("}", "\\rbrace"):
+                if state.ctx_marks and state.brace_depth == state.ctx_marks[-1].start_depth:
+                    closed = state.ctx_marks.pop().ctx
+                    if state.ctx_stack:
+                        state.ctx_stack.pop()
+                    if closed == TYPE_NUM:
+                        state.pending_ctx = TYPE_DEN
+                    elif closed == TYPE_DEN:
+                        state.pending_ctx = None
+                state.brace_depth = max(0, state.brace_depth - 1)
+                state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+                self._fill_relation_row(state, pos)
+                return
+
+        # content token:
+        if state.pending_ctx is not None:
+            state.ctx_stack.append(state.pending_ctx)
+            state.paths.append(tuple(state.ctx_stack))
+            state.ctx_stack.pop()
+
+            if state.pending_ctx == TYPE_NUM:
+                state.pending_ctx = TYPE_DEN
+            elif state.pending_ctx == TYPE_DEN:
+                state.pending_ctx = None
+            else:
+                state.pending_ctx = None
+            self._fill_relation_row(state, pos)
+            return
+
+        state.paths.append(tuple(state.ctx_stack) if state.ctx_stack else (TYPE_ROOT,))
+        self._fill_relation_row(state, pos)
+
+    def _fill_relation_row(self, state: L2RState, pos: int) -> None:
+        pi = state.paths[pos]
+        row_offset = pos * state.max_len
+        for j in range(pos + 1):
+            if state.tokens[j] == self.pad_id:
+                continue
+            pj = state.paths[j]
+            state.rel_list[row_offset + j] = self._pair_to_rel_id(pi, pj)
+            state.rel_list[j * state.max_len + pos] = self._pair_to_rel_id(pj, pi)
+
+    def materialize_state(self, state: L2RState, cur_len: int, device: torch.device) -> torch.Tensor:
+        rel = torch.tensor(state.rel_list, dtype=torch.long).view(state.max_len, state.max_len)
+        rel_sliced = rel[:cur_len, :cur_len]
+        return rel_sliced.to(device, non_blocking=True)
+
+    def clone_state(self, state: L2RState) -> L2RState:
+        return L2RState(
+            tokens=state.tokens.copy(),
+            ctx_stack=state.ctx_stack.copy(),
+            ctx_marks=[_CtxMark(ctx=m.ctx, start_depth=m.start_depth) for m in state.ctx_marks],
+            brace_depth=state.brace_depth,
+            pending_ctx=state.pending_ctx,
+            paths=state.paths.copy(),
+            rel_list=state.rel_list.copy(),
+            max_len=state.max_len,
+        )
+
 
     def _find_first(self, candidates: Set[str]) -> Optional[int]:
         for i, tok in enumerate(self.id2tok):
@@ -420,6 +606,16 @@ class Frame:
     token_indices: List[int]
 
 
+@dataclass
+class R2LState:
+    tokens: List[int]
+    frames: List[Frame]
+    path_refs: List[List[CtxNode]]
+    paths: List[Tuple[int, ...]]
+    rel_list: List[int]
+    max_len: int
+
+
 class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
     """
     Build causal relation ids (B, L, L) from LaTeX token ids (B, L)
@@ -430,6 +626,155 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.boundary_ids = self._find_all({"<sos>", "<eos>"})
+
+    def init_state(self, max_len: int, start_token: int) -> R2LState:
+        state = R2LState(
+            tokens=[],
+            frames=[Frame(node=None, operands=[], token_indices=[])],
+            path_refs=[],
+            paths=[],
+            rel_list=[0] * (max_len * max_len),
+            max_len=max_len,
+        )
+        self.append_state(state, start_token)
+        return state
+
+    def append_state(self, state: R2LState, token_id: int) -> None:
+        tid = int(token_id)
+        state.tokens.append(tid)
+        i = len(state.tokens) - 1
+
+        state.path_refs.append([])
+        state.paths.append((TYPE_ROOT,))
+
+        if tid == self.pad_id:
+            return
+
+        def current_path_nodes():
+            return [fr.node for fr in state.frames if fr.node is not None]
+
+        def materialize(nodes):
+            types = [n.type for n in nodes]
+            return (TYPE_ROOT,) if len(types) == 0 else tuple(types)
+
+        def resolve_operand(operand: Operand, target_type: int):
+            if operand.kind == "group":
+                if operand.node is not None:
+                    operand.node.type = target_type
+                    for idx in operand.token_indices:
+                        state.paths[idx] = materialize(state.path_refs[idx])
+            elif operand.kind == "atom":
+                node = CtxNode(target_type)
+                for idx in operand.token_indices:
+                    state.path_refs[idx].append(node)
+                    state.paths[idx] = materialize(state.path_refs[idx])
+
+        if tid in self.boundary_ids:
+            state.path_refs[i] = current_path_nodes()
+
+        elif tid in self.rbrace_ids:
+            state.path_refs[i] = current_path_nodes()
+            node = CtxNode(TYPE_UNK)
+            state.frames.append(Frame(node=node, operands=[], token_indices=[]))
+
+        elif tid in self.lbrace_ids:
+            state.path_refs[i] = current_path_nodes()
+            if len(state.frames) > 1:
+                closed = state.frames.pop()
+                closed.token_indices.append(i)
+                state.frames[-1].operands.append(
+                    Operand(
+                        kind="group",
+                        token_indices=closed.token_indices,
+                        node=closed.node,
+                        parent_nodes=current_path_nodes(),
+                    )
+                )
+
+        elif tid in self.sup_ids or tid in self.sub_ids:
+            state.path_refs[i] = current_path_nodes()
+            op_type = TYPE_SUP if tid in self.sup_ids else TYPE_SUB
+            if len(state.frames[-1].operands) > 0:
+                resolve_operand(state.frames[-1].operands[-1], op_type)
+
+        elif tid in self.frac_ids:
+            state.path_refs[i] = current_path_nodes()
+            if len(state.frames[-1].operands) >= 2:
+                resolve_operand(state.frames[-1].operands[-1], TYPE_NUM)
+                resolve_operand(state.frames[-1].operands[-2], TYPE_DEN)
+            elif len(state.frames[-1].operands) == 1:
+                resolve_operand(state.frames[-1].operands[-1], TYPE_NUM)
+
+        else:
+            state.path_refs[i] = current_path_nodes()
+            state.frames[-1].operands.append(
+                Operand(
+                    kind="atom",
+                    token_indices=[i],
+                    node=None,
+                    parent_nodes=current_path_nodes(),
+                )
+            )
+
+        state.paths[i] = materialize(state.path_refs[i])
+        for fr in state.frames[1:]:
+            fr.token_indices.append(i)
+
+        pi = state.paths[i]
+        row_offset = i * state.max_len
+        for j in range(i + 1):
+            if state.tokens[j] == self.pad_id:
+                continue
+            pj = state.paths[j]
+            state.rel_list[row_offset + j] = self._pair_to_rel_id(pi, pj)
+
+
+
+    def materialize_state(self, state: R2LState, cur_len: int, device: torch.device) -> torch.Tensor:
+        rel = torch.tensor(state.rel_list, dtype=torch.long).view(state.max_len, state.max_len)
+        rel_sliced = rel[:cur_len, :cur_len]
+        return rel_sliced.to(device, non_blocking=True)
+
+    def clone_state(self, state: R2LState) -> R2LState:
+        node_map = {}
+        def get_copied_node(node):
+            if node is None:
+                return None
+            nid = id(node)
+            if nid not in node_map:
+                node_map[nid] = CtxNode(node.type)
+            return node_map[nid]
+
+        new_frames = []
+        for fr in state.frames:
+            new_node = get_copied_node(fr.node)
+            new_operands = []
+            for op in fr.operands:
+                new_op = Operand(
+                    kind=op.kind,
+                    token_indices=op.token_indices.copy(),
+                    node=get_copied_node(op.node),
+                    parent_nodes=[get_copied_node(n) for n in op.parent_nodes]
+                )
+                new_operands.append(new_op)
+            new_frames.append(Frame(
+                node=new_node,
+                operands=new_operands,
+                token_indices=fr.token_indices.copy()
+            ))
+
+        new_path_refs = []
+        for ref in state.path_refs:
+            new_path_refs.append([get_copied_node(n) for n in ref])
+
+        return R2LState(
+            tokens=state.tokens.copy(),
+            frames=new_frames,
+            path_refs=new_path_refs,
+            paths=state.paths.copy(),
+            rel_list=state.rel_list.copy(),
+            max_len=state.max_len,
+        )
 
     def _paths_for_seq_ids(self, seq_ids: torch.Tensor) -> List[List[Tuple[int, ...]]]:
         """

@@ -70,7 +70,7 @@ class DecodeModel(nn.Module):
 
     @abstractmethod
     def transform(
-        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
+        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor, rel_ids: Optional[LongTensor] = None
     ) -> FloatTensor:
         """decode one step
 
@@ -100,6 +100,7 @@ class DecodeModel(nn.Module):
         alpha: float,
         early_stopping: bool,
         temperature: float,
+        use_cache: bool = True,
     ) -> List[Hypothesis]:
         """run beam search to decode
 
@@ -127,6 +128,7 @@ class DecodeModel(nn.Module):
                 alpha=alpha,
                 early_stopping=early_stopping,
                 temperature=temperature,
+                use_cache=use_cache,
             )
         return self._l2r_beam_search(
             src=src,
@@ -136,6 +138,7 @@ class DecodeModel(nn.Module):
             alpha=alpha,
             early_stopping=early_stopping,
             temperature=temperature,
+            use_cache=use_cache,
         )
 
     def _l2r_beam_search(
@@ -147,6 +150,7 @@ class DecodeModel(nn.Module):
         alpha: float,
         early_stopping: bool,
         temperature: float,
+        use_cache: bool = True,
     ) -> List[Hypothesis]:
         batch_size = src[0].shape[0]
         input_ids = torch.full(
@@ -167,6 +171,7 @@ class DecodeModel(nn.Module):
             beam_size=beam_size,
             max_len=max_len,
             temperature=temperature,
+            use_cache=use_cache,
         )
 
         scores = rearrange(scores, "(b m) -> b m", b=batch_size)
@@ -191,6 +196,7 @@ class DecodeModel(nn.Module):
         alpha: float,
         early_stopping: bool,
         temperature: float,
+        use_cache: bool = True,
     ) -> List[Hypothesis]:
         batch_size = src[0].shape[0] * 2  # mul 2 for bi-direction
         batch_beam_size = batch_size * beam_size
@@ -234,6 +240,7 @@ class DecodeModel(nn.Module):
             beam_size=beam_size,
             max_len=max_len,
             temperature=temperature,
+            use_cache=use_cache,
         )
 
         # reverse half last
@@ -292,15 +299,40 @@ class DecodeModel(nn.Module):
         beam_size: int,
         max_len: int,
         temperature: float,
+        use_cache: bool = True,
     ) -> Tuple[List[LongTensor], FloatTensor]:
         batch_size, cur_len = input_ids.shape
         vocab_size = self.vocab_info.vocab_size
 
         beam_scores = torch.zeros(batch_size, dtype=torch.float, device=self.device)
 
+        use_tree_bias = getattr(self, "use_tree_bias", False) and use_cache
+        is_bidirectional = getattr(self, "use_bidirectional", False)
+
+        relation_states = []
+        if use_tree_bias:
+            for i in range(batch_size):
+                start_tok = int(input_ids[i, 0].item())
+                if is_bidirectional and i >= batch_size // 2:
+                    state = self._tree_builder_r2l.init_state(max_len, start_tok)
+                else:
+                    state = self._tree_builder.init_state(max_len, start_tok)
+                relation_states.append(state)
+
         while cur_len < max_len and not beam_scorer.is_done():
+            rel_ids = None
+            if use_tree_bias:
+                rel_ids_list = []
+                for i, state in enumerate(relation_states):
+                    if is_bidirectional and i >= len(relation_states) // 2:
+                        rel_id = self._tree_builder_r2l.materialize_state(state, cur_len, self.device)
+                    else:
+                        rel_id = self._tree_builder.materialize_state(state, cur_len, self.device)
+                    rel_ids_list.append(rel_id)
+                rel_ids = torch.stack(rel_ids_list, dim=0)
+
             next_token_logits = (
-                self.transform(src, src_mask, input_ids)[:, -1, :] / temperature
+                self.transform(src, src_mask, input_ids, rel_ids=rel_ids)[:, -1, :] / temperature
             )
             next_token_scores = F.log_softmax(next_token_logits, dim=-1)
 
@@ -328,6 +360,17 @@ class DecodeModel(nn.Module):
                     src[i] = repeat(src[i], "b ... -> (b m) ...", m=beam_size)
                     src_mask[i] = repeat(src_mask[i], "b ... -> (b m) ...", m=beam_size)
 
+                if use_tree_bias:
+                    new_states = []
+                    for i, state in enumerate(relation_states):
+                        for _ in range(beam_size):
+                            if is_bidirectional and i >= batch_size // 2:
+                                cloned = self._tree_builder_r2l.clone_state(state)
+                            else:
+                                cloned = self._tree_builder.clone_state(state)
+                            new_states.append(cloned)
+                    relation_states = new_states
+
             beam_scores, beam_next_tokens, beam_idx = beam_scorer.process(
                 input_ids=input_ids,
                 next_scores=next_token_scores,
@@ -338,6 +381,23 @@ class DecodeModel(nn.Module):
             input_ids = torch.cat(
                 (input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)), dim=-1
             )
+
+            if use_tree_bias:
+                reordered_states = []
+                beam_idx_list = beam_idx.cpu().tolist()
+                beam_next_tokens_list = beam_next_tokens.cpu().tolist()
+                for i, parent_idx in enumerate(beam_idx_list):
+                    parent_state = relation_states[parent_idx]
+                    is_r2l_direction = is_bidirectional and (i >= len(beam_idx_list) // 2)
+                    if is_r2l_direction:
+                        cloned = self._tree_builder_r2l.clone_state(parent_state)
+                        self._tree_builder_r2l.append_state(cloned, beam_next_tokens_list[i])
+                    else:
+                        cloned = self._tree_builder.clone_state(parent_state)
+                        self._tree_builder.append_state(cloned, beam_next_tokens_list[i])
+                    reordered_states.append(cloned)
+                relation_states = reordered_states
+
             cur_len += 1
 
         return beam_scorer.finalize(input_ids, beam_scores)

@@ -239,6 +239,184 @@ class TestTreeBiasR2L(unittest.TestCase):
             
         self.assertEqual(out.shape, (4, 4, len(id2tok)))
 
+    def test_state_cache_equivalence(self):
+        expressions = [
+            ["x", "^", "{", "2", "}"],
+            ["x", "_", "{", "i", "}"],
+            ["x", "^", "{", "a", "_", "{", "i", "}", "}"],
+            ["\\frac", "{", "a", "}", "{", "b", "}"],
+            ["\\frac", "{", "a", "^", "{", "2", "}", "}", "{", "b", "}"],
+            ["x", "+", "\\{", "y", "\\}"],
+            ["x", "<pad>", "^", "{", "2", "}"],
+        ]
+
+        # Check L2R first
+        l2r_builder = Decoder(
+            d_model=16,
+            nhead=2,
+            num_decoder_layers=1,
+            dim_feedforward=32,
+            dropout=0.0,
+            dc=4,
+            cross_coverage=False,
+            self_coverage=False,
+            vocab_info=self.vocab_info,
+            use_tree_bias=True,
+            use_bidirectional=False,
+            tree_bias_num_buckets=8,
+            tree_bias_mode="full",
+        )._tree_builder
+
+        for expr in expressions:
+            tokens = [tok2id[t] for t in expr]
+            for length in range(1, len(tokens) + 1):
+                prefix = tokens[:length]
+                full_ids = l2r_builder.build(torch.tensor([prefix], dtype=torch.long))
+                state = l2r_builder.init_state(len(tokens), prefix[0])
+                for t in prefix[1:]:
+                    l2r_builder.append_state(state, t)
+                cached_ids = l2r_builder.materialize_state(state, length, torch.device("cpu"))
+                self.assertTrue(torch.equal(full_ids[0], cached_ids), f"L2R mismatch for prefix {expr[:length]}: full={full_ids[0]}, cached={cached_ids}")
+
+        # Check R2L
+        r2l_builder = self.builder
+        for expr in expressions:
+            r2l_expr = list(reversed(expr))
+            tokens = [tok2id[t] for t in r2l_expr]
+            for length in range(1, len(tokens) + 1):
+                prefix = tokens[:length]
+                full_ids = r2l_builder.build(torch.tensor([prefix], dtype=torch.long))
+                state = r2l_builder.init_state(len(tokens), prefix[0])
+                for t in prefix[1:]:
+                    r2l_builder.append_state(state, t)
+                cached_ids = r2l_builder.materialize_state(state, length, torch.device("cpu"))
+                self.assertTrue(torch.equal(full_ids[0], cached_ids), f"R2L mismatch for prefix {r2l_expr[:length]}: full={full_ids[0]}, cached={cached_ids}")
+
+    def test_beam_reorder_no_shared_mutable_state(self):
+        r2l_builder = self.builder
+        parent = r2l_builder.init_state(10, tok2id["}"])
+        r2l_builder.append_state(parent, tok2id["2"])
+        
+        beam1 = r2l_builder.clone_state(parent)
+        beam2 = r2l_builder.clone_state(parent)
+        
+        r2l_builder.append_state(beam1, tok2id["{"])
+        r2l_builder.append_state(beam1, tok2id["^"])
+        r2l_builder.append_state(beam1, tok2id["x"])
+        
+        r2l_builder.append_state(beam2, tok2id["{"])
+        r2l_builder.append_state(beam2, tok2id["_"])
+        r2l_builder.append_state(beam2, tok2id["y"])
+        
+        rel1 = r2l_builder.materialize_state(beam1, 5, torch.device("cpu"))
+        rel2 = r2l_builder.materialize_state(beam2, 5, torch.device("cpu"))
+        
+        expected_seq1 = torch.tensor([[tok2id["}"], tok2id["2"], tok2id["{"], tok2id["^"], tok2id["x"]]], dtype=torch.long)
+        expected_seq2 = torch.tensor([[tok2id["}"], tok2id["2"], tok2id["{"], tok2id["_"], tok2id["y"]]], dtype=torch.long)
+        
+        exp1 = r2l_builder.build(expected_seq1)[0]
+        exp2 = r2l_builder.build(expected_seq2)[0]
+        
+        self.assertTrue(torch.equal(rel1, exp1))
+        self.assertTrue(torch.equal(rel2, exp2))
+        self.assertFalse(torch.equal(rel1, rel2))
+
+    def test_decoder_equivalence(self):
+        decoder = Decoder(
+            d_model=16,
+            nhead=2,
+            num_decoder_layers=1,
+            dim_feedforward=32,
+            dropout=0.0,
+            dc=4,
+            cross_coverage=False,
+            self_coverage=False,
+            vocab_info=self.vocab_info,
+            use_tree_bias=True,
+            use_bidirectional=True,
+            tree_bias_num_buckets=8,
+            tree_bias_mode="full",
+        )
+        decoder.eval()
+        
+        src = torch.randn(2, 2, 2, 16)
+        src_mask = torch.zeros(2, 2, 2, dtype=torch.bool)
+        
+        tgt = torch.tensor([
+            [tok2id["<sos>"], tok2id["x"], tok2id["^"], tok2id["2"]],
+            [tok2id["<sos>"], tok2id["y"], tok2id["_"], tok2id["b"]],
+            [tok2id["<eos>"], tok2id["}"], tok2id["2"], tok2id["{"]],
+            [tok2id["<eos>"], tok2id["}"], tok2id["b"], tok2id["{"]]
+        ], dtype=torch.long)
+        
+        rel_ids_list = []
+        for i in range(4):
+            if i < 2:
+                state = decoder._tree_builder.init_state(4, tgt[i, 0].item())
+                for t in tgt[i, 1:]:
+                    decoder._tree_builder.append_state(state, t.item())
+                rel_ids_list.append(decoder._tree_builder.materialize_state(state, 4, torch.device("cpu")))
+            else:
+                state = decoder._tree_builder_r2l.init_state(4, tgt[i, 0].item())
+                for t in tgt[i, 1:]:
+                    decoder._tree_builder_r2l.append_state(state, t.item())
+                rel_ids_list.append(decoder._tree_builder_r2l.materialize_state(state, 4, torch.device("cpu")))
+        rel_ids_cached = torch.stack(rel_ids_list, dim=0)
+        
+        with torch.inference_mode():
+            out_none = decoder(src.repeat(2, 1, 1, 1), src_mask.repeat(2, 1, 1), tgt, rel_ids=None)
+            out_cached = decoder(src.repeat(2, 1, 1, 1), src_mask.repeat(2, 1, 1), tgt, rel_ids=rel_ids_cached)
+            
+        self.assertTrue(torch.allclose(out_none, out_cached, atol=1e-5))
+
+    def test_beam_search_equivalence(self):
+        decoder = Decoder(
+            d_model=16,
+            nhead=2,
+            num_decoder_layers=1,
+            dim_feedforward=32,
+            dropout=0.0,
+            dc=4,
+            cross_coverage=False,
+            self_coverage=False,
+            vocab_info=self.vocab_info,
+            use_tree_bias=True,
+            use_bidirectional=True,
+            tree_bias_num_buckets=8,
+            tree_bias_mode="full",
+        )
+        decoder.eval()
+        
+        src = [torch.randn(2, 2, 2, 16)]
+        src_mask = [torch.zeros(2, 2, 2, dtype=torch.bool)]
+        
+        with torch.inference_mode():
+            hyps_cached = decoder.beam_search(
+                src=src,
+                src_mask=src_mask,
+                beam_size=4,
+                max_len=10,
+                alpha=1.0,
+                early_stopping=False,
+                temperature=1.0,
+                use_cache=True,
+            )
+            hyps_nocache = decoder.beam_search(
+                src=src,
+                src_mask=src_mask,
+                beam_size=4,
+                max_len=10,
+                alpha=1.0,
+                early_stopping=False,
+                temperature=1.0,
+                use_cache=False,
+            )
+            
+        self.assertEqual(len(hyps_cached), len(hyps_nocache))
+        for h1, h2 in zip(hyps_cached, hyps_nocache):
+            self.assertEqual(h1.seq, h2.seq)
+            self.assertAlmostEqual(h1.score, h2.score, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()
