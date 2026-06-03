@@ -1,3 +1,447 @@
+# from abc import abstractmethod
+# from typing import Dict, List, Optional, Tuple
+
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# from .utils import Hypothesis, ce_loss, to_tgt_output
+# from einops import rearrange
+# from einops.einops import repeat
+# from torch import FloatTensor, LongTensor
+# from utils.vocab_info import VocabInfo
+# from .beam_search import BeamSearchScorer
+
+
+# # modified from
+# # https://github.com/huggingface/transformers/blob/af6e01c5bc39467f1e3ce47a2135fb1777af1db2/src/transformers/generation_utils.py#L1843
+
+
+# def _strip_generated_boundaries_cpu(
+#     seq: torch.Tensor,
+#     sos_id: int,
+#     eos_id: int,
+# ) -> torch.Tensor:
+#     """Strip boundary tokens (leading start token, trailing terminal token)
+#     from a 1-D generated sequence tensor.
+
+#     Rules
+#     -----
+#     - Remove the first token if it equals sos_id or eos_id (start token).
+#     - Remove the last token if it equals eos_id or sos_id (terminal token).
+#     - Interior tokens are never removed (even if they happen to be sos/eos).
+#     - Returns empty tensor safely.
+
+#     Parameters
+#     ----------
+#     seq : torch.Tensor
+#         1-D tensor of token ids (no PAD, already filtered). Must be on CPU.
+#     sos_id : int
+#     eos_id : int
+
+#     Returns
+#     -------
+#     torch.Tensor
+#         Cleaned 1-D tensor comparable to ground-truth label indices.
+#     """
+#     assert seq.device.type == "cpu", "Boundary stripping must run on CPU tensors only"
+#     if seq.numel() == 0:
+#         return seq
+
+#     boundary_ids = {sos_id, eos_id}
+
+#     # Remove leading start token
+#     start = 0
+#     if seq[0].item() in boundary_ids:
+#         start = 1
+
+#     # Remove trailing terminal token
+#     end = seq.numel()
+#     if end > start and seq[end - 1].item() in boundary_ids:
+#         end -= 1
+
+#     return seq[start:end]
+
+
+
+# class DecodeModel(nn.Module):
+#     @property
+#     def device(self):
+#         return next(self.parameters()).device
+
+#     @abstractmethod
+#     def transform(
+#         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor, rel_ids: Optional[LongTensor] = None
+#     ) -> FloatTensor:
+#         """decode one step
+
+#         Parameters
+#         ----------
+#         src : List[FloatTensor]
+#             [b, t, d]
+#         src_mask : List[LongTensor]
+#             [b, t]
+#         input_ids : LongTensor
+#             [b, l]
+
+#         Returns
+#         -------
+#         FloatTensor
+#             [b, l, vocab_size]
+#         """
+#         raise NotImplementedError("This is an abstract method.")
+
+
+#     def beam_search(
+#         self,
+#         src: List[FloatTensor],
+#         src_mask: List[LongTensor],
+#         beam_size: int,
+#         max_len: int,
+#         alpha: float,
+#         early_stopping: bool,
+#         temperature: float,
+#         use_cache: bool = True,
+#     ) -> List[Hypothesis]:
+#         """run beam search to decode
+
+#         Parameters
+#         ----------
+#         src : List[FloatTensor]
+#             [b, t, d]
+#         src_mask : List[LongTensor]
+#             [b, t]
+#         beam_size : int
+#         max_len : int
+#         alpha : float
+#         early_stopping : bool
+
+#         Returns
+#         -------
+#         List[Hypothesis]: [batch_size,]
+#         """
+#         if getattr(self, "use_bidirectional", False):
+#             return self._bidirectional_beam_search(
+#                 src=src,
+#                 src_mask=src_mask,
+#                 beam_size=beam_size,
+#                 max_len=max_len,
+#                 alpha=alpha,
+#                 early_stopping=early_stopping,
+#                 temperature=temperature,
+#                 use_cache=use_cache,
+#             )
+#         return self._l2r_beam_search(
+#             src=src,
+#             src_mask=src_mask,
+#             beam_size=beam_size,
+#             max_len=max_len,
+#             alpha=alpha,
+#             early_stopping=early_stopping,
+#             temperature=temperature,
+#             use_cache=use_cache,
+#         )
+
+#     def _l2r_beam_search(
+#         self,
+#         src: List[FloatTensor],
+#         src_mask: List[LongTensor],
+#         beam_size: int,
+#         max_len: int,
+#         alpha: float,
+#         early_stopping: bool,
+#         temperature: float,
+#         use_cache: bool = True,
+#     ) -> List[Hypothesis]:
+#         batch_size = src[0].shape[0]
+#         input_ids = torch.full(
+#             (batch_size, 1),
+#             fill_value=self.vocab_info.sos_id,
+#             dtype=torch.long,
+#             device=self.device,
+#         )
+
+#         beam_scorer = BeamSearchScorer(
+#             batch_size, beam_size, alpha, early_stopping, self.device, self.vocab_info
+#         )
+#         hyps, scores = self._beam_search(
+#             src=list(src),
+#             src_mask=list(src_mask),
+#             input_ids=input_ids,
+#             beam_scorer=beam_scorer,
+#             beam_size=beam_size,
+#             max_len=max_len,
+#             temperature=temperature,
+#             use_cache=use_cache,
+#         )
+
+#         scores = rearrange(scores, "(b m) -> b m", b=batch_size)
+#         best_scores, best_indices = torch.max(scores, dim=1)
+#         batch_offsets = torch.arange(batch_size, dtype=torch.long, device=self.device) * beam_size
+#         best_indices = batch_offsets + best_indices
+
+#         best_indices_cpu = best_indices.cpu().tolist()
+#         best_scores_cpu = best_scores.cpu().tolist()
+
+#         ret: List[Hypothesis] = []
+#         for idx, score in zip(best_indices_cpu, best_scores_cpu):
+#             ret.append(Hypothesis(hyps[idx].cpu(), score, "l2r"))
+#         return ret
+
+#     def _bidirectional_beam_search(
+#         self,
+#         src: List[FloatTensor],
+#         src_mask: List[LongTensor],
+#         beam_size: int,
+#         max_len: int,
+#         alpha: float,
+#         early_stopping: bool,
+#         temperature: float,
+#         use_cache: bool = True,
+#     ) -> List[Hypothesis]:
+#         batch_size = src[0].shape[0] * 2  # mul 2 for bi-direction
+#         batch_beam_size = batch_size * beam_size
+#         half_bb_size = batch_beam_size // 2
+
+#         src = list(src)
+#         src_mask = list(src_mask)
+
+#         for i in range(len(src)):
+#             # Bidirectional beam search: duplicate encoder features for l2r + r2l directions.
+#             # This copy is done ONCE here, before the decode loop, not inside it.
+#             # TODO: if memory is very tight, keep src as [B,...] and use batch-index
+#             #       indirection inside the loop instead of materialising the copy.
+#             src[i] = torch.cat((src[i], src[i]), dim=0)
+#             src_mask[i] = torch.cat((src_mask[i], src_mask[i]), dim=0)
+
+#         l2r = torch.full(
+#             (batch_size // 2, 1),
+#             fill_value=self.vocab_info.sos_id,
+#             dtype=torch.long,
+#             device=self.device,
+#         )
+#         r2l = torch.full(
+#             (batch_size // 2, 1),
+#             fill_value=self.vocab_info.eos_id,
+#             dtype=torch.long,
+#             device=self.device,
+#         )
+#         input_ids = torch.cat((l2r, r2l), dim=0)
+
+#         beam_scorer = BeamSearchScorer(
+#             batch_size, beam_size, alpha, early_stopping, self.device, self.vocab_info
+#         )
+
+#         # first beam search
+#         hyps, scores = self._beam_search(
+#             src=src,
+#             src_mask=src_mask,
+#             input_ids=input_ids,
+#             beam_scorer=beam_scorer,
+#             beam_size=beam_size,
+#             max_len=max_len,
+#             temperature=temperature,
+#             use_cache=use_cache,
+#         )
+
+#         # reverse half last
+#         for i in range(half_bb_size, batch_beam_size):
+#             hyps[i] = torch.flip(hyps[i], dims=[0])
+
+#         lens = [len(h) + 1 for h in hyps]  # plus to append start token
+#         r2l_tgt, r2l_out = to_tgt_output(
+#             hyps[:half_bb_size], "r2l", self.device, self.vocab_info.sos_id, self.vocab_info.eos_id, self.vocab_info.pad_id, pad_to_len=max(lens)
+#         )
+#         l2r_tgt, l2r_out = to_tgt_output(
+#             hyps[half_bb_size:], "l2r", self.device, self.vocab_info.sos_id, self.vocab_info.eos_id, self.vocab_info.pad_id, pad_to_len=max(lens)
+#         )
+#         tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
+#         out = torch.cat((l2r_out, r2l_out), dim=0)
+
+#         # calculate final score
+#         rev_scores = self._rate(src, src_mask, tgt, out, alpha, temperature)
+#         rev_scores = torch.cat(
+#             (rev_scores[half_bb_size:], rev_scores[:half_bb_size]), dim=0
+#         )
+#         scores = scores + rev_scores
+
+#         # [2 * b, beam_size]
+#         scores = rearrange(scores, "(b m) -> b m", b=batch_size)
+#         l2r_scores, r2l_scores = torch.chunk(scores, 2, dim=0)
+#         # [b, 2 * beam_size]
+#         scores = torch.cat((l2r_scores, r2l_scores), dim=1)
+#         # [batch_size, ]
+#         best_scores, best_indices = torch.max(scores, dim=1)
+#         best_split = best_indices // beam_size
+#         best_indices = best_indices % beam_size
+#         batch_indices = torch.arange(
+#             0, batch_size // 2, dtype=torch.long, device=self.device
+#         )
+#         best_indices = (
+#             best_split * half_bb_size + batch_indices * beam_size + best_indices
+#         )
+
+#         # Post-decode CPU conversion — .cpu().tolist() is allowed here (outside hot loop)
+#         best_indices_cpu = best_indices.cpu().tolist()
+#         best_scores_cpu = best_scores.cpu().tolist()
+
+#         ret: List[Hypothesis] = []
+#         for idx, score in zip(best_indices_cpu, best_scores_cpu):
+#             hpy = Hypothesis(hyps[idx].cpu(), score, "l2r")
+#             ret.append(hpy)
+#         return ret
+
+#     def _beam_search(
+#         self,
+#         src: List[FloatTensor],
+#         src_mask: List[LongTensor],
+#         input_ids: LongTensor,
+#         beam_scorer: BeamSearchScorer,
+#         beam_size: int,
+#         max_len: int,
+#         temperature: float,
+#         use_cache: bool = True,
+#     ) -> Tuple[List[LongTensor], FloatTensor]:
+#         batch_size, cur_len = input_ids.shape
+#         vocab_size = self.vocab_info.vocab_size
+
+#         beam_scores = torch.zeros(batch_size, dtype=torch.float, device=self.device)
+
+#         use_tree_bias = getattr(self, "use_tree_bias", False) and use_cache
+#         is_bidirectional = getattr(self, "use_bidirectional", False)
+
+#         relation_states = []
+#         if use_tree_bias:
+#             for i in range(batch_size):
+#                 start_tok = int(input_ids[i, 0].item())
+#                 if is_bidirectional and i >= batch_size // 2:
+#                     state = self._tree_builder_r2l.init_state(max_len, start_tok)
+#                 else:
+#                     state = self._tree_builder.init_state(max_len, start_tok)
+#                 relation_states.append(state)
+
+#         while cur_len < max_len and not beam_scorer.is_done():
+#             rel_ids = None
+#             if use_tree_bias:
+#                 rel_ids_list = []
+#                 for i, state in enumerate(relation_states):
+#                     if is_bidirectional and i >= len(relation_states) // 2:
+#                         rel_id = self._tree_builder_r2l.materialize_state(state, cur_len, self.device)
+#                     else:
+#                         rel_id = self._tree_builder.materialize_state(state, cur_len, self.device)
+#                     rel_ids_list.append(rel_id)
+#                 rel_ids = torch.stack(rel_ids_list, dim=0)
+
+#             next_token_logits = (
+#                 self.transform(src, src_mask, input_ids, rel_ids=rel_ids)[:, -1, :] / temperature
+#             )
+#             next_token_scores = F.log_softmax(next_token_logits, dim=-1)
+
+#             next_token_scores = next_token_scores + beam_scores[:, None].expand_as(
+#                 next_token_scores
+#             )
+            
+#             reshape_size = next_token_scores.shape[0] // batch_size
+#             next_token_scores = rearrange(
+#                 next_token_scores,
+#                 "(b m) v -> b (m v)",
+#                 m=reshape_size,
+#             )
+
+#             next_token_scores, next_tokens = torch.topk(
+#                 next_token_scores, 2 * beam_size, dim=1
+#             )
+
+#             next_indices = next_tokens // vocab_size
+#             next_tokens = next_tokens % vocab_size
+
+#             if cur_len == 1:
+#                 input_ids = repeat(input_ids, "b l -> (b m) l", m=beam_size)
+#                 for i in range(len(src)):
+#                     src[i] = repeat(src[i], "b ... -> (b m) ...", m=beam_size)
+#                     src_mask[i] = repeat(src_mask[i], "b ... -> (b m) ...", m=beam_size)
+
+#                 if use_tree_bias:
+#                     new_states = []
+#                     for i, state in enumerate(relation_states):
+#                         for _ in range(beam_size):
+#                             if is_bidirectional and i >= batch_size // 2:
+#                                 cloned = self._tree_builder_r2l.clone_state(state)
+#                             else:
+#                                 cloned = self._tree_builder.clone_state(state)
+#                             new_states.append(cloned)
+#                     relation_states = new_states
+
+#             beam_scores, beam_next_tokens, beam_idx = beam_scorer.process(
+#                 input_ids=input_ids,
+#                 next_scores=next_token_scores,
+#                 next_tokens=next_tokens,
+#                 next_indices=next_indices,
+#             )
+
+#             input_ids = torch.cat(
+#                 (input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)), dim=-1
+#             )
+
+#             if use_tree_bias:
+#                 reordered_states = []
+#                 beam_idx_list = beam_idx.cpu().tolist()
+#                 beam_next_tokens_list = beam_next_tokens.cpu().tolist()
+#                 for i, parent_idx in enumerate(beam_idx_list):
+#                     parent_state = relation_states[parent_idx]
+#                     is_r2l_direction = is_bidirectional and (i >= len(beam_idx_list) // 2)
+#                     if is_r2l_direction:
+#                         cloned = self._tree_builder_r2l.clone_state(parent_state)
+#                         self._tree_builder_r2l.append_state(cloned, beam_next_tokens_list[i])
+#                     else:
+#                         cloned = self._tree_builder.clone_state(parent_state)
+#                         self._tree_builder.append_state(cloned, beam_next_tokens_list[i])
+#                     reordered_states.append(cloned)
+#                 relation_states = reordered_states
+
+#             cur_len += 1
+
+#         return beam_scorer.finalize(input_ids, beam_scores)
+
+#     def _rate(
+#         self,
+#         src: List[FloatTensor],
+#         src_mask: List[LongTensor],
+#         tgt: LongTensor,
+#         out: LongTensor,
+#         alpha: float,
+#         temperature: float,
+#     ) -> FloatTensor:
+#         """rate tgt and output
+
+#         Parameters
+#         ----------
+#         src : List[FloatTensor]
+#             [b * beam_size, t, d]
+#         src_mask : List[LongTensor]
+#             [b * beam_size, t]
+#         tgt : LongTensor
+#             [b * beam_size, l]
+#         out : LongTensor
+#             [b * beam_size, l]
+#         alpha : float
+#         temperature : float
+
+#         Returns
+#         -------
+#         FloatTensor
+#             [b * beam_size]
+#         """
+#         b = tgt.shape[0]
+#         rel_ids = None
+#         if getattr(self, "use_tree_bias", False) and hasattr(self, "_build_rel_ids_for_tgt"):
+#             rel_ids = self._build_rel_ids_for_tgt(tgt)
+#         out_hat = self.transform(src, src_mask, tgt, rel_ids=rel_ids) / temperature
+#         loss = ce_loss(out_hat, out, ignore_idx=self.vocab_info.pad_id, reduction="none")
+#         loss = rearrange(loss, "(b l) -> b l", b=b)
+#         mask = tgt == self.vocab_info.pad_id
+#         penalty = (~mask).sum(dim=1) ** alpha
+#         loss = -torch.sum(loss, dim=1) / penalty
+#         return loss
 from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
@@ -310,26 +754,31 @@ class DecodeModel(nn.Module):
         is_bidirectional = getattr(self, "use_bidirectional", False)
 
         relation_states = []
+        rel_cache = None
         if use_tree_bias:
+            # Keep one materialized relation tensor per active hypothesis on the
+            # decoder device. Parser states remain lightweight; only this cache
+            # carries the O(max_len^2) data needed by the existing full-prefix
+            # decoder. During beam reorder we copy only the active cur_len block.
+            rel_cache = torch.zeros(
+                (batch_size, max_len, max_len),
+                dtype=torch.long,
+                device=self.device,
+            )
             for i in range(batch_size):
                 start_tok = int(input_ids[i, 0].item())
                 if is_bidirectional and i >= batch_size // 2:
                     state = self._tree_builder_r2l.init_state(max_len, start_tok)
+                    self._tree_builder_r2l.write_relation_cache(state, rel_cache, i)
                 else:
                     state = self._tree_builder.init_state(max_len, start_tok)
+                    self._tree_builder.write_relation_cache(state, rel_cache, i)
                 relation_states.append(state)
 
         while cur_len < max_len and not beam_scorer.is_done():
             rel_ids = None
             if use_tree_bias:
-                rel_ids_list = []
-                for i, state in enumerate(relation_states):
-                    if is_bidirectional and i >= len(relation_states) // 2:
-                        rel_id = self._tree_builder_r2l.materialize_state(state, cur_len, self.device)
-                    else:
-                        rel_id = self._tree_builder.materialize_state(state, cur_len, self.device)
-                    rel_ids_list.append(rel_id)
-                rel_ids = torch.stack(rel_ids_list, dim=0)
+                rel_ids = rel_cache[: len(relation_states), :cur_len, :cur_len]
 
             next_token_logits = (
                 self.transform(src, src_mask, input_ids, rel_ids=rel_ids)[:, -1, :] / temperature
@@ -361,6 +810,19 @@ class DecodeModel(nn.Module):
                     src_mask[i] = repeat(src_mask[i], "b ... -> (b m) ...", m=beam_size)
 
                 if use_tree_bias:
+                    # Expand the batched relation cache once, matching the
+                    # repeat(input_ids, "b l -> (b m) l") order.
+                    parent_idx = torch.arange(
+                        len(relation_states), dtype=torch.long, device=self.device
+                    ).repeat_interleave(beam_size)
+                    expanded_cache = rel_cache.new_zeros(
+                        (len(relation_states) * beam_size, max_len, max_len)
+                    )
+                    expanded_cache[:, :cur_len, :cur_len] = rel_cache[
+                        :, :cur_len, :cur_len
+                    ].index_select(0, parent_idx)
+                    rel_cache = expanded_cache
+
                     new_states = []
                     for i, state in enumerate(relation_states):
                         for _ in range(beam_size):
@@ -386,15 +848,28 @@ class DecodeModel(nn.Module):
                 reordered_states = []
                 beam_idx_list = beam_idx.cpu().tolist()
                 beam_next_tokens_list = beam_next_tokens.cpu().tolist()
+
+                # Reorder only the active prefix block, not the whole max_len^2
+                # cache. clone() protects against parent duplicates and in-place
+                # overwrite when several children come from the same parent.
+                active = len(beam_idx_list)
+                parent_block = rel_cache[:, :cur_len, :cur_len].index_select(0, beam_idx).clone()
+                rel_cache[:active, :cur_len, :cur_len] = parent_block
+                if cur_len < max_len:
+                    rel_cache[:active, cur_len, :cur_len + 1].zero_()
+                    rel_cache[:active, :cur_len + 1, cur_len].zero_()
+
                 for i, parent_idx in enumerate(beam_idx_list):
                     parent_state = relation_states[parent_idx]
                     is_r2l_direction = is_bidirectional and (i >= len(beam_idx_list) // 2)
                     if is_r2l_direction:
                         cloned = self._tree_builder_r2l.clone_state(parent_state)
                         self._tree_builder_r2l.append_state(cloned, beam_next_tokens_list[i])
+                        self._tree_builder_r2l.write_relation_cache(cloned, rel_cache, i, pos=cur_len)
                     else:
                         cloned = self._tree_builder.clone_state(parent_state)
                         self._tree_builder.append_state(cloned, beam_next_tokens_list[i])
+                        self._tree_builder.write_relation_cache(cloned, rel_cache, i, pos=cur_len)
                     reordered_states.append(cloned)
                 relation_states = reordered_states
 
