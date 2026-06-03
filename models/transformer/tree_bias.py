@@ -11,10 +11,9 @@ TYPE_SUP   = 1
 TYPE_SUB   = 2
 TYPE_NUM   = 3
 TYPE_DEN   = 4
-TYPE_UNK   = 5
 
 TYPE_SIZE_L2R = 5
-TYPE_SIZE_BIDIR = 6
+TYPE_SIZE_BIDIR = 5
 
 
 
@@ -671,7 +670,7 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
 
         elif tid in self.rbrace_ids:
             state.path_refs[i] = current_path_nodes()
-            node = CtxNode(TYPE_UNK)
+            node = CtxNode(TYPE_ROOT)
             state.frames.append(Frame(node=node, operands=[], token_indices=[]))
 
         elif tid in self.lbrace_ids:
