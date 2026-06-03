@@ -126,15 +126,15 @@ class TreeRelationBuilder:
         tj = pj_clean[lcp] if lcp < len(pj_clean) else TYPE_ROOT
 
         if self.rel_set == "script":
-            keep_i = (ti == TYPE_ROOT) or (ti == TYPE_SUP) or (ti == TYPE_SUB) or (ti == TYPE_UNK)
-            keep_j = (tj == TYPE_ROOT) or (tj == TYPE_SUP) or (tj == TYPE_SUB) or (tj == TYPE_UNK)
+            keep_i = (ti == TYPE_ROOT) or (ti == TYPE_SUP) or (ti == TYPE_SUB) 
+            keep_j = (tj == TYPE_ROOT) or (tj == TYPE_SUP) or (tj == TYPE_SUB)
             if not keep_i:
                 ti = TYPE_ROOT
             if not keep_j:
                 tj = TYPE_ROOT
         elif self.rel_set == "fraction":
-            keep_i = (ti == TYPE_ROOT) or (ti == TYPE_NUM) or (ti == TYPE_DEN) or (ti == TYPE_UNK)
-            keep_j = (tj == TYPE_ROOT) or (tj == TYPE_NUM) or (tj == TYPE_DEN) or (tj == TYPE_UNK)
+            keep_i = (ti == TYPE_ROOT) or (ti == TYPE_NUM) or (ti == TYPE_DEN) 
+            keep_j = (tj == TYPE_ROOT) or (tj == TYPE_NUM) or (tj == TYPE_DEN) 
             if not keep_i:
                 ti = TYPE_ROOT
             if not keep_j:
@@ -819,7 +819,7 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
 
             elif tid in self.rbrace_ids:
                 path_refs[i] = current_path_nodes()
-                node = CtxNode(TYPE_UNK)
+                node = CtxNode(TYPE_ROOT)
                 frames.append(Frame(node=node, operands=[], token_indices=[]))
 
             elif tid in self.lbrace_ids:
@@ -918,15 +918,15 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
             tj = pj_clean[lcp] if lcp < len(pj_clean) else TYPE_ROOT
 
             if self.rel_set == "script":
-                keep_i = (ti == TYPE_ROOT) or (ti == TYPE_SUP) or (ti == TYPE_SUB) or (ti == TYPE_UNK)
-                keep_j = (tj == TYPE_ROOT) or (tj == TYPE_SUP) or (tj == TYPE_SUB) or (tj == TYPE_UNK)
+                keep_i = (ti == TYPE_ROOT) or (ti == TYPE_SUP) or (ti == TYPE_SUB)
+                keep_j = (tj == TYPE_ROOT) or (tj == TYPE_SUP) or (tj == TYPE_SUB)
                 if not keep_i:
                     ti = TYPE_ROOT
                 if not keep_j:
                     tj = TYPE_ROOT
             elif self.rel_set == "fraction":
-                keep_i = (ti == TYPE_ROOT) or (ti == TYPE_NUM) or (ti == TYPE_DEN) or (ti == TYPE_UNK)
-                keep_j = (tj == TYPE_ROOT) or (tj == TYPE_NUM) or (tj == TYPE_DEN) or (tj == TYPE_UNK)
+                keep_i = (ti == TYPE_ROOT) or (ti == TYPE_NUM) or (ti == TYPE_DEN)   
+                keep_j = (tj == TYPE_ROOT) or (tj == TYPE_NUM) or (tj == TYPE_DEN)  
                 if not keep_i:
                     ti = TYPE_ROOT
                 if not keep_j:
@@ -953,7 +953,7 @@ class CausalR2LTreeRelationBuilder(TreeRelationBuilder):
 
             elif tid in self.rbrace_ids:
                 path_refs[i] = current_path_nodes()
-                node = CtxNode(TYPE_UNK)
+                node = CtxNode(TYPE_ROOT)
                 frames.append(Frame(node=node, operands=[], token_indices=[]))
 
             elif tid in self.lbrace_ids:
