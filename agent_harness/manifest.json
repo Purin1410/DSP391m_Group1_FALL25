@@ -1,0 +1,16 @@
+{
+  "name": "comer_kv_cache_agent_harness",
+  "created_for": "Purin1410/DSP391m_Group1_FALL25 branch LiSRB",
+  "task": "Implement inference-only KV-cache for CoMER beam search without changing training/full-prefix behavior.",
+  "read_order": [
+    "CLAUDE.md",
+    "agent_harness/README_AGENT_KV_CACHE.md",
+    "agent_harness/context/00_task_brief.md",
+    "agent_harness/context/01_repo_map.md",
+    "agent_harness/context/02_implementation_contract.md",
+    "agent_harness/testing/TEST_MATRIX.md"
+  ],
+  "reference_only": [
+    "agent_harness/reference/final_kv_cache_implementation_plan_comer.md"
+  ]
+}

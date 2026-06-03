@@ -1668,18 +1668,29 @@ class TreeRelativeBias(nn.Module):
         nn.init.zeros_(self.emb.weight)
 
     def forward(self, rel_ids: torch.LongTensor, flatten: bool = False) -> torch.Tensor:
-        if rel_ids.dim() != 3:
-            raise ValueError(f"rel_ids must be (B, L, L), got {tuple(rel_ids.shape)}")
-        B, L, S = rel_ids.shape
-        if L != S:
-            raise ValueError(f"rel_ids must be square (B, L, L), got {tuple(rel_ids.shape)}")
+        """Convert relation ids to per-head bias.
 
-        # (B, L, L, H) -> (B, H, L, L)
+        Parameters
+        ----------
+        rel_ids : (B, T, S) LongTensor
+            T == S for training (square).  T == 1 is allowed for incremental
+            decode (one query token attending to S cached keys). The full-square
+            training/validation path remains byte-exact.
+        flatten : bool
+            If True return (B*H, T, S) so it matches attn_output_weights shape.
+        """
+        if rel_ids.dim() != 3:
+            raise ValueError(f"rel_ids must be (B, T, S), got {tuple(rel_ids.shape)}")
+        B, T, S = rel_ids.shape
+        # NOTE: square check removed to support incremental T=1 decode.
+        # Training always passes T==S, so square behavior is unchanged.
+
+        # (B, T, S, H) -> (B, H, T, S)
         bias = self.emb(rel_ids).permute(0, 3, 1, 2).contiguous()
 
         if flatten:
-            # (B*H, L, L) - matches attn_output_weights shape
-            return bias.view(B * self.num_heads, L, L)
+            # (B*H, T, S) - matches attn_output_weights shape
+            return bias.view(B * self.num_heads, T, S)
 
         return bias
 

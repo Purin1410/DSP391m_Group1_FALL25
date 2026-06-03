@@ -216,3 +216,144 @@ class Decoder(DecodeModel):
         assert len(src) == 1 and len(src_mask) == 1
         return self(src[0], src_mask[0], input_ids, rel_ids=rel_ids)
 
+    # ------------------------------------------------------------------
+    # Incremental KV-cache inference APIs (eval / no-grad only)
+    # ------------------------------------------------------------------
+
+    def init_decode_cache(
+        self,
+        src: FloatTensor,    # [B, h, w, D]
+        src_mask: LongTensor,  # [B, h, w]
+        max_len: int,
+    ) -> "DecoderKVCache":
+        """Pre-project encoder memory and allocate all KV/ARM buffers.
+
+        Must be called in eval mode under torch.no_grad().
+
+        Parameters
+        ----------
+        src : [B, h, w, D]   encoder feature map
+        src_mask : [B, h, w] True = padded
+        max_len : int
+
+        Returns
+        -------
+        DecoderKVCache  ready for the first transform_step call
+        """
+        from .transformer.kv_cache import DecoderKVCache
+        from einops import rearrange as _re
+
+        B, h, w, D = src.shape
+        S = h * w
+        num_layers = self.model.num_layers
+        num_heads = self.model.layers[0].self_attn.num_heads
+        head_dim = self.model.layers[0].self_attn.head_dim
+
+        # Flatten memory: [S, B, D]
+        memory = _re(src, "b h w d -> (h w) b d")
+        mem_mask = _re(src_mask, "b h w -> b (h w)")   # [B, S]
+
+        # Pre-project cross K/V for each layer
+        cross_k = []
+        cross_v = []
+        for layer in self.model.layers:
+            ck, cv = layer.multihead_attn.project_static_kv(memory)
+            cross_k.append(ck)  # [B, H, S, Hd]
+            cross_v.append(cv)
+
+        # Allocate self K/V buffers (filled incrementally)
+        device = src.device
+        dtype = src.dtype
+        self_k = [torch.zeros(B, num_heads, max_len, head_dim, device=device, dtype=dtype)
+                  for _ in range(num_layers)]
+        self_v = [torch.zeros(B, num_heads, max_len, head_dim, device=device, dtype=dtype)
+                  for _ in range(num_layers)]
+
+        # Allocate ARM fp32 running sums (num_layers - 1 inter-layer gaps)
+        num_gaps = max(num_layers - 1, 0)
+        cross_pre_sum = [torch.zeros(B, num_heads, S, dtype=torch.float32, device=device)
+                         for _ in range(num_gaps)]
+        cross_final_sum = [torch.zeros(B, num_heads, S, dtype=torch.float32, device=device)
+                           for _ in range(num_gaps)]
+
+        cache = DecoderKVCache(
+            self_k=self_k,
+            self_v=self_v,
+            cross_k=cross_k,
+            cross_v=cross_v,
+            cross_pre_sum=cross_pre_sum,
+            cross_final_sum=cross_final_sum,
+            beam_to_batch_idx=torch.arange(B, device=device, dtype=torch.long),
+            memory_key_padding_mask=mem_mask,
+            height=h,
+            cur_len=0,
+            max_len=max_len,
+            batch_size=B,
+            beam_size=1,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            head_dim=head_dim,
+        )
+        return cache
+
+    def transform_step(
+        self,
+        src: List[FloatTensor],
+        src_mask: List[LongTensor],
+        token_ids: LongTensor,          # [B_active, cur_len+1]  full prefix including new token
+        cache: "DecoderKVCache",
+        rel_ids_step: Optional[LongTensor] = None,  # [B_active, 1, cur_len+1]
+    ) -> FloatTensor:
+        """Incremental one-step decode using KV cache.
+
+        Must be called in eval mode under torch.no_grad().
+        Increments cache.cur_len after the forward pass.
+
+        Parameters
+        ----------
+        token_ids : [B_active, cur_len+1]  — only the last column is the new token
+        cache : DecoderKVCache
+        rel_ids_step : optional [B_active, 1, cur_len+1] tree relation ids for
+            the new query token attending to the current prefix
+
+        Returns
+        -------
+        logits : FloatTensor  [B_active, vocab_size]  (last token logits)
+        """
+        from .transformer.kv_cache import DecoderKVCache
+
+        B_active = token_ids.shape[0]
+        write_pos = cache.cur_len  # 0-indexed position being written
+
+        # Embed only the last (new) token
+        new_tok = token_ids[:, -1:]                           # [B_active, 1]
+        tgt_embed = self.word_embed(new_tok)                  # [B_active, 1, D]
+
+        # Add positional encoding at row `write_pos` only
+        pos_enc = self.pos_enc.pe[write_pos:write_pos + 1, :]  # [1, D]
+        tgt_embed = tgt_embed + pos_enc.unsqueeze(0)           # [B_active, 1, D]
+        tgt_embed = self.norm(tgt_embed)
+
+        # Seq-first for transformer layers: [1, B_active, D]
+        tgt_step = tgt_embed.transpose(0, 1).contiguous()
+
+        # Build tree-bias row if enabled
+        rel_bias_step = None
+        if self.use_tree_bias and self._tree_rel_bias is not None and rel_ids_step is not None:
+            # rel_ids_step: [B_active, 1, cur_len+1]
+            rel_bias_step = self._tree_rel_bias(rel_ids_step, flatten=True)  # [B_active*H, 1, cur_len+1]
+
+        # Run through decoder stack
+        out = self.model.forward_step(
+            tgt_step=tgt_step,
+            cache=cache,
+            rel_bias_step=rel_bias_step,
+        )  # [1, B_active, D]
+
+        out = out.transpose(0, 1)  # [B_active, 1, D]
+        logits = self.proj(out[:, 0, :])  # [B_active, vocab_size]
+
+        # Increment position counter
+        cache.cur_len += 1
+
+        return logits

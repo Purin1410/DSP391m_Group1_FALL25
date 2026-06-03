@@ -97,3 +97,68 @@ class AttentionRefinementModule(nn.Module):
 
         cov = rearrange(cov, "(b t) n h w -> (b n) t (h w)", t=t)
         return cov
+
+    def forward_from_sums(
+        self,
+        prev_attn_sum: Tensor,
+        curr_attn_sum: Tensor,
+        key_padding_mask: Tensor,
+        h: int,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Compute ARM bias from pre-accumulated coverage sums for one step.
+
+        Equivalent to ``full_arm(...)[:, -1:, :]`` but operating on fp32
+        running sums rather than the full attention history.
+
+        The sums represent cumulative attention *before* the current token
+        (i.e., the sum up to but not including the current position).
+
+        Parameters
+        ----------
+        prev_attn_sum : Tensor  fp32  [B_active, H, S]
+            Cumulative sum of *previous-layer* cross-attention weights for all
+            prior tokens (layer i-1 final attention).
+        curr_attn_sum : Tensor  fp32  [B_active, H, S]
+            Cumulative sum of *current-layer* pre-ARM cross-attention weights
+            for all prior tokens.
+        key_padding_mask : Tensor  [B_original, S]  (bool, True = padded)
+        h : int  spatial height of encoder feature map
+        dtype : torch.dtype  output dtype to cast back to (model dtype)
+
+        Returns
+        -------
+        Tensor  [B_active*H, 1, S]  ARM logit correction for the current step
+        """
+        # prev_attn_sum / curr_attn_sum : fp32 [B, H, S]
+        B_active, H, S = prev_attn_sum.shape
+
+        # Build the coverage channel tensor expected by conv:
+        # shape [B, n_channels, 1, S] where n_channels = nhead (prev) or 2*nhead (both)
+        attns = []
+        if self.cross_coverage:
+            attns.append(prev_attn_sum)   # [B, H, S]
+        if self.self_coverage:
+            attns.append(curr_attn_sum)   # [B, H, S]
+
+        # Stack channels: [B, C, S]  where C = nhead or 2*nhead
+        cov_flat = torch.cat(attns, dim=1).float()  # ensure fp32
+
+        # Reshape to image format for Conv2d: [B, C, h, w]
+        cov_2d = rearrange(cov_flat, "b c (h w) -> b c h w", h=h)
+
+        # Build the padding mask in image format: [B, 1, h, w]
+        # key_padding_mask may be from the original batch; gather for active beams.
+        # Caller is responsible for passing the already-gathered mask.
+        mask_2d = key_padding_mask.float().view(B_active, 1, h, -1).bool()
+
+        cov_out = self.conv(cov_2d)          # [B, dc, h, w]
+        cov_out = self.act(cov_out)
+        cov_out = cov_out.masked_fill(mask_2d, 0.0)
+        cov_out = self.proj(cov_out)         # [B, H, h, w]
+        cov_out = self.post_norm(cov_out, mask_2d)
+        # Flatten spatial: [B, H, h*w] = [B, H, S]
+        cov_out = cov_out.view(B_active, H, S)
+        # Rearrange to [B*H, 1, S]
+        cov_out = cov_out.view(B_active * H, 1, S)
+        return cov_out.to(dtype=dtype)

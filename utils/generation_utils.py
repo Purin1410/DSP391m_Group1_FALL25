@@ -750,16 +750,23 @@ class DecodeModel(nn.Module):
 
         beam_scores = torch.zeros(batch_size, dtype=torch.float, device=self.device)
 
-        use_tree_bias = getattr(self, "use_tree_bias", False) and use_cache
+        use_tree_state_cache = use_cache
+        use_kv_cache = use_cache
         is_bidirectional = getattr(self, "use_bidirectional", False)
+
+        # KV-cache is only active during eval/no-grad; fall back to full-prefix otherwise
+        use_kv_cache_active = (
+            use_kv_cache
+            and hasattr(self, "init_decode_cache")
+            and (not self.training)
+            and (not torch.is_grad_enabled())
+        )
+
+        use_tree_bias = getattr(self, "use_tree_bias", False) and use_tree_state_cache
 
         relation_states = []
         rel_cache = None
         if use_tree_bias:
-            # Keep one materialized relation tensor per active hypothesis on the
-            # decoder device. Parser states remain lightweight; only this cache
-            # carries the O(max_len^2) data needed by the existing full-prefix
-            # decoder. During beam reorder we copy only the active cur_len block.
             rel_cache = torch.zeros(
                 (batch_size, max_len, max_len),
                 dtype=torch.long,
@@ -775,20 +782,62 @@ class DecodeModel(nn.Module):
                     self._tree_builder.write_relation_cache(state, rel_cache, i)
                 relation_states.append(state)
 
-        while cur_len < max_len and not beam_scorer.is_done():
-            rel_ids = None
-            if use_tree_bias:
-                rel_ids = rel_cache[: len(relation_states), :cur_len, :cur_len]
+        # ----------------------------------------------------------------
+        # KV-cache warm-up: process SOS token into cache before expanding
+        # ----------------------------------------------------------------
+        kv_cache = None
+        if use_kv_cache_active:
+            assert len(src) == 1 and len(src_mask) == 1, "KV-cache requires single src/src_mask"
+            kv_cache = self.init_decode_cache(src[0], src_mask[0], max_len)
 
-            next_token_logits = (
-                self.transform(src, src_mask, input_ids, rel_ids=rel_ids)[:, -1, :] / temperature
+            # Build rel_ids_step for SOS position (shape [B, 1, 1])
+            sos_rel_ids_step = None
+            if use_tree_bias and rel_cache is not None:
+                sos_rel_ids_step = rel_cache[:batch_size, :1, :1]  # [B, 1, 1]
+
+            # Step through SOS token
+            _ = self.transform_step(
+                src=src,
+                src_mask=src_mask,
+                token_ids=input_ids,          # [B, 1] = SOS
+                cache=kv_cache,
+                rel_ids_step=sos_rel_ids_step,
             )
+            # cur_len is now 1
+
+        while cur_len < max_len and not beam_scorer.is_done():
+            # ---- Compute logits ----
+            if use_kv_cache_active and kv_cache is not None:
+                # Incremental step: only embed/decode the last token
+                rel_ids_step = None
+                if use_tree_bias and rel_cache is not None:
+                    active = len(relation_states)
+                    # row cur_len-1 attending to positions 0..cur_len-1
+                    rel_ids_step = rel_cache[:active, cur_len - 1:cur_len, :cur_len]  # [B_active, 1, cur_len]
+
+                next_token_logits = self.transform_step(
+                    src=src,
+                    src_mask=src_mask,
+                    token_ids=input_ids,
+                    cache=kv_cache,
+                    rel_ids_step=rel_ids_step,
+                ) / temperature
+            else:
+                # Full-prefix fallback (original path)
+                rel_ids = None
+                if use_tree_bias:
+                    rel_ids = rel_cache[: len(relation_states), :cur_len, :cur_len]
+
+                next_token_logits = (
+                    self.transform(src, src_mask, input_ids, rel_ids=rel_ids)[:, -1, :] / temperature
+                )
+
             next_token_scores = F.log_softmax(next_token_logits, dim=-1)
 
             next_token_scores = next_token_scores + beam_scores[:, None].expand_as(
                 next_token_scores
             )
-            
+
             reshape_size = next_token_scores.shape[0] // batch_size
             next_token_scores = rearrange(
                 next_token_scores,
@@ -809,9 +858,11 @@ class DecodeModel(nn.Module):
                     src[i] = repeat(src[i], "b ... -> (b m) ...", m=beam_size)
                     src_mask[i] = repeat(src_mask[i], "b ... -> (b m) ...", m=beam_size)
 
+                # Expand KV-cache (beam-indexed tensors only)
+                if use_kv_cache_active and kv_cache is not None:
+                    kv_cache.expand_beam_(beam_size)
+
                 if use_tree_bias:
-                    # Expand the batched relation cache once, matching the
-                    # repeat(input_ids, "b l -> (b m) l") order.
                     parent_idx = torch.arange(
                         len(relation_states), dtype=torch.long, device=self.device
                     ).repeat_interleave(beam_size)
@@ -840,6 +891,10 @@ class DecodeModel(nn.Module):
                 next_indices=next_indices,
             )
 
+            # Reorder KV-cache before appending selected token
+            if use_kv_cache_active and kv_cache is not None:
+                kv_cache.reorder_(beam_idx)
+
             input_ids = torch.cat(
                 (input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)), dim=-1
             )
@@ -849,9 +904,6 @@ class DecodeModel(nn.Module):
                 beam_idx_list = beam_idx.cpu().tolist()
                 beam_next_tokens_list = beam_next_tokens.cpu().tolist()
 
-                # Reorder only the active prefix block, not the whole max_len^2
-                # cache. clone() protects against parent duplicates and in-place
-                # overwrite when several children come from the same parent.
                 active = len(beam_idx_list)
                 parent_block = rel_cache[:, :cur_len, :cur_len].index_select(0, beam_idx).clone()
                 rel_cache[:active, :cur_len, :cur_len] = parent_block
