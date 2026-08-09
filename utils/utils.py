@@ -179,45 +179,6 @@ def to_bi_tgt_out(
     return tgt, out
 
 
-def to_l2r_tgt_out_from_padded(
-    labels: LongTensor,
-    lengths: LongTensor,
-    sos_id: int,
-    eos_id: int,
-    pad_id: int,
-) -> Tuple[LongTensor, LongTensor]:
-    """Vectorized left-to-right target/output construction from padded labels.
-
-    Parameters
-    ----------
-    labels : LongTensor [B, L]
-        Padded label tensor (pad positions filled with pad_id).
-    lengths : LongTensor [B]
-        Actual label lengths (non-pad count per sample).
-    sos_id, eos_id, pad_id : int
-        Token ids.
-
-    Returns
-    -------
-    Tuple[LongTensor, LongTensor]
-        tgt: [B, L+1], out: [B, L+1]
-    """
-    B, L = labels.shape
-    device = labels.device
-    out_len = L + 1  # space for start/stop token
-
-    tgt = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
-    out = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
-
-    tgt[:, 0] = sos_id
-    tgt[:, 1:L + 1] = labels
-
-    out[:, :L] = labels
-    out[torch.arange(B, device=device), lengths] = eos_id
-
-    return tgt, out
-
-
 def to_bi_tgt_out_from_padded(
     labels: LongTensor,
     lengths: LongTensor,
@@ -246,9 +207,16 @@ def to_bi_tgt_out_from_padded(
     device = labels.device
     out_len = L + 1  # space for start/stop token
 
-    l2r_tgt, l2r_out = to_l2r_tgt_out_from_padded(
-        labels, lengths, sos_id=sos_id, eos_id=eos_id, pad_id=pad_id
-    )
+    # ---- l2r ----
+    l2r_tgt = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
+    l2r_out = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)
+
+    l2r_tgt[:, 0] = sos_id
+    l2r_tgt[:, 1:L+1] = labels  # labels already padded with pad_id
+
+    l2r_out[:, :L] = labels
+    # Place EOS at position lengths[i] for each sample
+    l2r_out[torch.arange(B, device=device), lengths] = eos_id
 
     # ---- r2l (reversed labels) ----
     r2l_tgt = torch.full((B, out_len), pad_id, dtype=torch.long, device=device)

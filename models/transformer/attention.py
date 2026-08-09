@@ -147,176 +147,6 @@ class MultiheadAttention(nn.Module):
                 rel_bias=rel_bias,
             )
 
-    # ------------------------------------------------------------------
-    # Projection helpers (used by cached inference paths only)
-    # ------------------------------------------------------------------
-
-    def _project_q(self, query: Tensor) -> Tensor:
-        """Project query → [tgt_len, bsz, embed_dim] (same slice as full forward)."""
-        embed_dim = self.embed_dim
-        if self.in_proj_weight is not None:
-            _w = self.in_proj_weight[:embed_dim, :]
-            _b = self.in_proj_bias[:embed_dim] if self.in_proj_bias is not None else None
-        else:
-            _w = self.q_proj_weight
-            _b = self.in_proj_bias[:embed_dim] if self.in_proj_bias is not None else None
-        return F.linear(query, _w, _b)
-
-    def _project_kv(self, key: Tensor, value: Tensor):
-        """Project key and value → each [src_len, bsz, embed_dim]."""
-        embed_dim = self.embed_dim
-        if self.in_proj_weight is not None:
-            _w = self.in_proj_weight[embed_dim:, :]
-            _b = self.in_proj_bias[embed_dim:] if self.in_proj_bias is not None else None
-            k, v = F.linear(key, _w, _b).chunk(2, dim=-1)
-        else:
-            bk = self.in_proj_bias[embed_dim: embed_dim * 2] if self.in_proj_bias is not None else None
-            bv = self.in_proj_bias[embed_dim * 2:] if self.in_proj_bias is not None else None
-            k = F.linear(key, self.k_proj_weight, bk)
-            v = F.linear(value, self.v_proj_weight, bv)
-        return k, v
-
-    def project_static_kv(self, memory: Tensor):
-        """Pre-project cross-attention K/V for the entire encoder output.
-
-        Parameters
-        ----------
-        memory : Tensor  [S, B, D]  (encoder output in seq-first layout)
-
-        Returns
-        -------
-        k : Tensor  [B, H, S, Hd]
-        v : Tensor  [B, H, S, Hd]
-        """
-        S, B, _ = memory.shape
-        H = self.num_heads
-        Hd = self.head_dim
-        k_raw, v_raw = self._project_kv(memory, memory)       # [S, B, D]
-        # reshape → [B, H, S, Hd]
-        k = k_raw.contiguous().view(S, B * H, Hd).transpose(0, 1).view(B, H, S, Hd)
-        v = v_raw.contiguous().view(S, B * H, Hd).transpose(0, 1).view(B, H, S, Hd)
-        return k, v
-
-    # ------------------------------------------------------------------
-    # Cached self-attention step
-    # ------------------------------------------------------------------
-
-    def forward_cached_self(
-        self,
-        query_step: Tensor,                       # [1, B_active, D]
-        cache_k: Tensor,                          # [B_active, H, max_len, Hd]
-        cache_v: Tensor,                          # [B_active, H, max_len, Hd]
-        write_pos: int,
-        rel_bias_step: Optional[Tensor] = None,   # [B_active*H, 1, write_pos+1]
-    ):
-        """Incremental causal self-attention for one new query position.
-
-        Writes the new K/V at cache[:, :, write_pos, :] in-place, then
-        attends to all positions 0 … write_pos (inclusive).  No causal mask
-        is needed because there is only one query row.
-
-        Returns
-        -------
-        output : Tensor  [1, B_active, D]
-        attn   : Tensor  [B_active*H, 1, write_pos+1]
-        """
-        B_active = query_step.shape[1]
-        H = self.num_heads
-        Hd = self.head_dim
-        scaling = float(Hd) ** -0.5
-
-        # Project query for the new token
-        q = self._project_q(query_step)                                   # [1, B_active, D]
-        q = q.contiguous().view(1, B_active * H, Hd).transpose(0, 1) * scaling
-
-        # Project new K/V
-        k_new, v_new = self._project_kv(query_step, query_step)
-        k_new = k_new.contiguous().view(1, B_active * H, Hd).transpose(0, 1)  # [B_active*H, 1, Hd]
-        v_new = v_new.contiguous().view(1, B_active * H, Hd).transpose(0, 1)
-
-        # Write into cache
-        cache_k[:, :, write_pos:write_pos + 1, :] = k_new.view(B_active, H, 1, Hd)
-        cache_v[:, :, write_pos:write_pos + 1, :] = v_new.view(B_active, H, 1, Hd)
-
-        # Attend to prefix 0 … write_pos
-        seq_len = write_pos + 1
-        k_seq = cache_k[:, :, :seq_len, :].contiguous().view(B_active * H, seq_len, Hd)
-        v_seq = cache_v[:, :, :seq_len, :].contiguous().view(B_active * H, seq_len, Hd)
-
-        attn_w = torch.bmm(q, k_seq.transpose(1, 2))       # [B_active*H, 1, seq_len]
-        if rel_bias_step is not None:
-            attn_w = attn_w + rel_bias_step.to(dtype=attn_w.dtype)
-        attn_w = F.softmax(attn_w, dim=-1)
-        # No dropout during eval
-
-        out = torch.bmm(attn_w, v_seq)                     # [B_active*H, 1, Hd]
-        out = out.transpose(0, 1).contiguous().view(1, B_active, self.embed_dim)
-        out = F.linear(out, self.out_proj.weight, self.out_proj.bias)
-        return out, attn_w
-
-    # ------------------------------------------------------------------
-    # Cached cross-attention step
-    # ------------------------------------------------------------------
-
-    def forward_cached_cross(
-        self,
-        query_step: Tensor,                         # [1, B_active, D]
-        static_k: Tensor,                           # [B_original, H, S, Hd]
-        static_v: Tensor,                           # [B_original, H, S, Hd]
-        key_padding_mask: Optional[Tensor],         # [B_original, S] True=masked
-        beam_to_batch_idx: Tensor,                  # [B_active] LongTensor
-        arm_bias: Optional[Tensor] = None,          # [B_active*H, 1, S]
-    ):
-        """Incremental cross-attention over pre-projected static encoder memory.
-
-        Cross K/V are indexed per original-batch item via beam_to_batch_idx,
-        so they are never duplicated across beam hypotheses.
-
-        Returns
-        -------
-        output : Tensor  [1, B_active, D]
-        attn   : Tensor  [B_active*H, 1, S]
-        """
-        B_active = query_step.shape[1]
-        H = self.num_heads
-        Hd = self.head_dim
-        B_orig, _, S, _ = static_k.shape
-        scaling = float(Hd) ** -0.5
-
-        # Gather K/V for active beams
-        k = static_k[beam_to_batch_idx].contiguous().view(B_active * H, S, Hd)
-        v = static_v[beam_to_batch_idx].contiguous().view(B_active * H, S, Hd)
-
-        # Project query
-        q = self._project_q(query_step)
-        q = q.contiguous().view(1, B_active * H, Hd).transpose(0, 1) * scaling
-
-        attn_w = torch.bmm(q, k.transpose(1, 2))       # [B_active*H, 1, S]
-
-        # Key padding mask
-        if key_padding_mask is not None:
-            mask = key_padding_mask[beam_to_batch_idx]  # [B_active, S]
-            attn_w_4d = attn_w.view(B_active, H, 1, S)
-            attn_w_4d = attn_w_4d.masked_fill(
-                mask.unsqueeze(1).unsqueeze(2), float("-inf")
-            )
-            attn_w = attn_w_4d.view(B_active * H, 1, S)
-
-        # ARM correction (subtract, matching the full-prefix convention):
-        # attn_output_weights -= arm(attention) → re-softmax
-        # Here we subtract arm_bias BEFORE softmax (pre-computed from sums).
-        if arm_bias is not None:
-            attn_w = attn_w - arm_bias.to(dtype=attn_w.dtype)
-
-        attn_w = F.softmax(attn_w, dim=-1)              # [B_active*H, 1, S]
-        # No dropout during eval
-
-        out = torch.bmm(attn_w, v)                      # [B_active*H, 1, Hd]
-        out = out.transpose(0, 1).contiguous().view(1, B_active, self.embed_dim)
-        out = F.linear(out, self.out_proj.weight, self.out_proj.bias)
-        return out, attn_w
-
-
 
 
 
@@ -541,6 +371,12 @@ def multi_head_attention_forward(
     assert list(attn_output_weights.size()) == [bsz * num_heads, tgt_len, src_len]
 
     if rel_bias is not None:
+        # LiSRB tree-relative bias (or any other additive attention bias).
+        # This function has no notion of L2R/R2L or which rows should be
+        # biased -- the caller decides that (see
+        # models/decoder.py::Decoder._build_rel_bias_for_tgt) and passes a
+        # bias tensor already shaped for the current batch (with plain
+        # zeros for rows that shouldn't be biased).
         if rel_bias.dim() == 3:
             if rel_bias.size(0) == bsz:
                 rel_bias = rel_bias.unsqueeze(1).expand(bsz, num_heads, tgt_len, src_len)
@@ -563,13 +399,15 @@ def multi_head_attention_forward(
         else:
             raise RuntimeError(f"rel_bias must have dim 3 or 4, got {rel_bias.dim()}")
 
-        if rel_bias.size(1) != tgt_len or rel_bias.size(2) != src_len:
+        if list(rel_bias.size()) != list(attn_output_weights.size()):
             raise RuntimeError(
-                f"rel_bias length mismatch: got {tuple(rel_bias.shape)}, "
-                f"expected (*, {tgt_len}, {src_len})"
+                f"rel_bias shape {tuple(rel_bias.shape)} does not match "
+                f"attn_output_weights shape {tuple(attn_output_weights.shape)} "
+                "after normalization -- fail loudly instead of silently "
+                "mis-adding bias to the wrong batch rows/heads."
             )
 
-        attn_output_weights.add_(rel_bias.to(dtype=attn_output_weights.dtype))
+        attn_output_weights = attn_output_weights + rel_bias.to(dtype=attn_output_weights.dtype)
 
     def mask_softmax_dropout(dots):
         if attn_mask is not None:

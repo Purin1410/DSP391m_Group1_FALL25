@@ -7,7 +7,6 @@ from .utils import (build_train_dataset,
                     BucketedBatchSampler)
 from .vocab import Vocab
 from .utils import Batch
-from models.transformer.tree_bias import TreeRelationBuilder, CausalR2LTreeRelationBuilder
 import torch
 
 class CROHMEDatamodule(pl.LightningDataModule):
@@ -43,38 +42,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         self.persistent_workers         = data_config.persistent_workers
         if CROHMEDatamodule.shared_vocab is None:
             CROHMEDatamodule.shared_vocab = Vocab(dict_path=data_config.dictionary_txt)
-        self.vocab = CROHMEDatamodule.shared_vocab
-
-        # Tree bias builder for precomputing rel_ids in DataLoader workers
-        mcfg = self.config.model
-        self.use_bidirectional = bool(mcfg.get("use_bidirectional", False))
-        self.use_tree_bias = bool(mcfg.get("use_tree_bias", True))
-
-        if self.use_tree_bias:
-            type_size = 6 if self.use_bidirectional else 5
-            self.tree_builder = TreeRelationBuilder(
-                id2tok=self.vocab.idx2word,
-                pad_id=self.vocab.PAD_IDX,
-                num_buckets=mcfg.get("tree_bias_num_buckets", 16),
-                mode=mcfg.get("tree_bias_mode", "full"),
-                rel_set=mcfg.get("tree_bias_rel_set", "full"),
-                type_size=type_size,
-            )
-            if self.use_bidirectional:
-                self.tree_builder_r2l = CausalR2LTreeRelationBuilder(
-                    id2tok=self.vocab.idx2word,
-                    pad_id=self.vocab.PAD_IDX,
-                    num_buckets=mcfg.get("tree_bias_num_buckets", 16),
-                    mode=mcfg.get("tree_bias_mode", "full"),
-                    rel_set=mcfg.get("tree_bias_rel_set", "full"),
-                    type_size=type_size,
-                )
-            else:
-                self.tree_builder_r2l = None
-        else:
-            self.tree_builder = None
-            self.tree_builder_r2l = None
-        
+        self.vocab = CROHMEDatamodule.shared_vocab        
         self.train_batch_sampler = None
         self.val_batch_sampler = None
         self.test_batch_sampler = None
@@ -92,20 +60,6 @@ class CROHMEDatamodule(pl.LightningDataModule):
         n_samples = len(heights_x)
         max_height_x = max(heights_x) if n_samples > 0 else 0
         max_width_x = max(widths_x) if n_samples > 0 else 0
-        
-        # pad_strategy = self.config.data.get("pad_strategy", "batch_max")
-        # pad_to_multiple = self.config.data.get("pad_to_multiple", 32)
-        # static_pad_height = self.config.data.get("static_pad_height", None)
-        # static_pad_width = self.config.data.get("static_pad_width", None)
-
-        # if pad_strategy == "bucket":
-        #     max_height_x = ((max_height_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
-        #     max_width_x = ((max_width_x + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple
-        # elif pad_strategy == "static":
-        #     if static_pad_height is not None:
-        #         max_height_x = max(max_height_x, static_pad_height)
-        #     if static_pad_width is not None:
-        #         max_width_x = max(max_width_x, static_pad_width)
 
         x = torch.zeros(n_samples, 1, max_height_x, max_width_x)
         x_mask = torch.ones(n_samples, max_height_x, max_width_x, dtype=torch.bool)
@@ -113,7 +67,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
             x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
 
-        from utils.utils import to_bi_tgt_out_from_padded, to_l2r_tgt_out_from_padded
+        from utils.utils import to_bi_tgt_out_from_padded
         
         lengths_x = [len(s) for s in seqs_y]
         max_len = max(lengths_x) if len(lengths_x) > 0 else 0
@@ -122,29 +76,13 @@ class CROHMEDatamodule(pl.LightningDataModule):
             labels[i, :lengths_x[i]] = torch.tensor(s, dtype=torch.long)
         lengths = torch.tensor(lengths_x, dtype=torch.long)
         
-        target_builder = (
-            to_bi_tgt_out_from_padded
-            if self.use_bidirectional
-            else to_l2r_tgt_out_from_padded
-        )
-        tgt, out = target_builder(
-            labels,
-            lengths,
+        # Vectorized bidirectional tgt/out from padded labels (D1)
+        tgt, out = to_bi_tgt_out_from_padded(
+            labels, lengths,
             sos_id=self.vocab.SOS_IDX,
             eos_id=self.vocab.EOS_IDX,
             pad_id=self.vocab.PAD_IDX,
         )
-
-        # Precompute tree relation IDs on CPU (offloaded to DataLoader workers)
-        rel_ids = None
-        if self.tree_builder is not None:
-            if self.use_bidirectional:
-                half_B = tgt.shape[0] // 2
-                rel_ids_l2r = self.tree_builder.build(tgt[:half_B])
-                rel_ids_r2l = self.tree_builder_r2l.build(tgt[half_B:])
-                rel_ids = torch.cat([rel_ids_l2r, rel_ids_r2l], dim=0)
-            else:
-                rel_ids = self.tree_builder.build(tgt)
 
         return Batch(
             img_bases=fnames,
@@ -155,7 +93,6 @@ class CROHMEDatamodule(pl.LightningDataModule):
             out=out,
             labels=labels,
             lengths=lengths,
-            rel_ids=rel_ids
         )
 
         

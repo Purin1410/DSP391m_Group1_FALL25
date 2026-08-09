@@ -1,3 +1,4 @@
+import warnings
 from typing import List, Optional, Tuple
 
 import torch
@@ -5,6 +6,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch import FloatTensor, LongTensor
 
+from utils.bidirectional import BidirectionalLayout
 from utils.vocab_info import VocabInfo
 
 from .pos_enc import WordPosEnc
@@ -13,7 +15,7 @@ from .transformer.transformer_decoder import (
     TransformerDecoder,
     TransformerDecoderLayer,
 )
-from .transformer.tree_bias import TreeRelationBuilder, TreeRelativeBias, CausalR2LTreeRelationBuilder
+from .transformer.tree_bias import TreeRelationBuilder, TreeRelativeBias
 from utils.generation_utils import DecodeModel
 
 
@@ -39,7 +41,9 @@ def _build_transformer_decoder(
     else:
         arm = None
 
-    decoder = TransformerDecoder(decoder_layer, num_decoder_layers, arm, tree_bias_layers=tree_bias_layers)
+    decoder = TransformerDecoder(
+        decoder_layer, num_decoder_layers, arm, tree_bias_layers=tree_bias_layers
+    )
     return decoder
 
 
@@ -60,11 +64,9 @@ class Decoder(DecodeModel):
         tree_bias_mode: str = "full",
         tree_bias_layers: str = "all",
         tree_bias_rel_set: str = "full",
-        use_bidirectional: bool = False,
     ):
         super().__init__()
         self.vocab_info = vocab_info
-        self.use_bidirectional = bool(use_bidirectional)
 
         self.word_embed = nn.Sequential(
             nn.Embedding(vocab_info.vocab_size, d_model), nn.LayerNorm(d_model)
@@ -88,36 +90,46 @@ class Decoder(DecodeModel):
 
         self.proj = nn.Linear(d_model, vocab_info.vocab_size)
 
-        # -----------------------------
-        # Tree-structure relative bias
-        # -----------------------------
+        # -----------------------------------------------------------------
+        # LiSRB: tree-structure relative bias, L2R-only.
+        #
+        # CoMER always decodes bidirectionally (see to_bi_tgt_out in
+        # utils/utils.py): rows [0, B) of `tgt` are L2R, rows [B, 2B) are
+        # R2L. The bias below is only ever computed from and applied to the
+        # L2R half; the R2L half gets a plain torch.zeros(...) that never
+        # touches self._tree_rel_bias.emb, so it carries no gradient and no
+        # value from the bias table -- see _build_rel_bias_for_tgt below and
+        # utils/bidirectional.py for the single source of truth on the
+        # L2R/R2L split. Neither attention.py nor transformer_decoder.py
+        # know this convention exists; they only see one additive tensor.
+        # -----------------------------------------------------------------
         self.use_tree_bias = bool(use_tree_bias)
         self.tree_bias_layers = tree_bias_layers
 
         if self.use_tree_bias:
-            if vocab_info is None or vocab_info.words is None or not hasattr(vocab_info.words, "idx2word"):
+            if vocab_info is None or vocab_info.words is None or not hasattr(
+                vocab_info.words, "idx2word"
+            ):
                 raise ValueError("Tree bias requires vocab_info.words.idx2word")
 
-            type_size = 6 if self.use_bidirectional else 5
             self._tree_builder = TreeRelationBuilder(
                 id2tok=vocab_info.words.idx2word,
                 pad_id=vocab_info.pad_id,
                 num_buckets=tree_bias_num_buckets,
                 mode=tree_bias_mode,
                 rel_set=tree_bias_rel_set,
-                type_size=type_size,
             )
-            if self.use_bidirectional:
-                self._tree_builder_r2l = CausalR2LTreeRelationBuilder(
-                    id2tok=vocab_info.words.idx2word,
-                    pad_id=vocab_info.pad_id,
-                    num_buckets=tree_bias_num_buckets,
-                    mode=tree_bias_mode,
-                    rel_set=tree_bias_rel_set,
-                    type_size=type_size,
+            if not (
+                self._tree_builder.sup_ids
+                or self._tree_builder.sub_ids
+                or self._tree_builder.frac_ids
+            ):
+                warnings.warn(
+                    "Tree bias is enabled but none of ^, _, \\frac/\\dfrac/\\tfrac "
+                    "were found in the vocabulary -- every relation will resolve "
+                    "to TYPE_ROOT and the bias becomes a no-op. Check that "
+                    "vocab_info.words.idx2word matches the training dictionary."
                 )
-            else:
-                self._tree_builder_r2l = None
 
             self._tree_rel_bias = TreeRelativeBias(
                 num_heads=nhead,
@@ -125,11 +137,35 @@ class Decoder(DecodeModel):
             )
         else:
             self._tree_builder = None
-            self._tree_builder_r2l = None
             self._tree_rel_bias = None
-        # Causal mask cache: keyed by (device_type, device_index, dtype_str)
-        # so CPU->CUDA or dtype changes don't reuse a stale/wrong-device mask.
+
         self._causal_mask_cache = {}
+
+    def _build_rel_bias_for_tgt(self, tgt: torch.LongTensor) -> Optional[torch.Tensor]:
+        """Build the additive self-attention bias for a bidirectional `tgt`
+        batch, biasing only the L2R half. Returns None when tree bias is
+        disabled."""
+        if not self.use_tree_bias or self._tree_rel_bias is None:
+            return None
+
+        l2r_slice, r2l_slice = BidirectionalLayout.split(tgt.shape[0])
+
+        rel_ids_l2r = self._tree_builder.build(tgt[l2r_slice])  # [B, L, L]
+        rel_bias_l2r = self._tree_rel_bias(rel_ids_l2r, flatten=True)  # [B*H, L, L]
+
+        n_r2l = r2l_slice.stop - r2l_slice.start
+        # Plain zeros, never routed through self._tree_rel_bias.emb: the R2L
+        # half gets no bias and no gradient from the bias table, by
+        # construction rather than by coincidence.
+        rel_bias_r2l = torch.zeros(
+            n_r2l * self._tree_rel_bias.num_heads,
+            rel_bias_l2r.size(1),
+            rel_bias_l2r.size(2),
+            dtype=rel_bias_l2r.dtype,
+            device=rel_bias_l2r.device,
+        )
+
+        return torch.cat([rel_bias_l2r, rel_bias_r2l], dim=0)  # [2B*H, L, L]
 
     def _build_attention_mask(self, length, device=None, dtype=torch.bool):
         if device is None:
@@ -147,18 +183,11 @@ class Decoder(DecodeModel):
         self._causal_mask_cache[cache_key] = mask
         return mask
 
-    def _build_rel_ids_for_tgt(self, tgt: torch.LongTensor) -> torch.LongTensor:
-        if self.use_bidirectional:
-            half_B = tgt.shape[0] // 2
-            rel_ids_l2r = self._tree_builder.build(tgt[:half_B])
-            rel_ids_r2l = self._tree_builder_r2l.build(tgt[half_B:])
-            return torch.cat([rel_ids_l2r, rel_ids_r2l], dim=0)
-        else:
-            return self._tree_builder.build(tgt)
-
     def forward(
-        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor, rel_ids: Optional[LongTensor] = None
-    ) -> FloatTensor:
+        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor,
+        return_aux: bool = False, capture_embed: bool = False,
+        capture_cross_attn: bool = False, capture_self_attn: bool = False
+    ):
         """generate output for tgt
 
         Parameters
@@ -179,11 +208,7 @@ class Decoder(DecodeModel):
         tgt_mask = self._build_attention_mask(l)
         tgt_pad_mask = tgt == self.vocab_info.pad_id
 
-        rel_bias = None
-        if self.use_tree_bias and self._tree_rel_bias is not None:
-            if rel_ids is None:
-                rel_ids = self._build_rel_ids_for_tgt(tgt)
-            rel_bias = self._tree_rel_bias(rel_ids, flatten=True)
+        rel_bias = self._build_rel_bias_for_tgt(tgt)
 
         tgt = self.word_embed(tgt)  # [b, l, d]
         tgt = self.pos_enc(tgt)  # [b, l, d]
@@ -194,166 +219,50 @@ class Decoder(DecodeModel):
         src_mask = rearrange(src_mask, "b h w -> b (h w)")
         tgt = rearrange(tgt, "b l d -> l b d")
 
-        out = self.model(
+        model_out = self.model(
             tgt=tgt,
             memory=src,
             height=h,
             tgt_mask=tgt_mask,
             tgt_key_padding_mask=tgt_pad_mask,
             memory_key_padding_mask=src_mask,
+            return_attn_maps=capture_cross_attn,
+            return_self_attn_maps=capture_self_attn,
             rel_bias=rel_bias,
         )
 
-        out = rearrange(out, "l b d -> b l d")
-        out = self.proj(out)
+        attn_maps = None
+        self_attn_maps = None
+        if capture_cross_attn and capture_self_attn:
+            out, attn_payload = model_out
+            attn_maps = attn_payload.get("cross_attn")
+            self_attn_maps = attn_payload.get("self_attn")
+        elif capture_cross_attn:
+            out, attn_maps = model_out
+        elif capture_self_attn:
+            out, attn_payload = model_out
+            self_attn_maps = attn_payload.get("self_attn")
+        else:
+            out = model_out
 
-        return out
+        out = rearrange(out, "l b d -> b l d")
+        embed_seq = out.detach() if capture_embed else None
+        logits = self.proj(out)
+
+        if return_aux:
+            aux = {
+                "embed_seq": embed_seq,
+                "cross_attn": attn_maps,
+                "self_attn": self_attn_maps,
+                "height": h,
+            }
+            return logits, aux
+        return logits
 
 
     def transform(
-        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor, rel_ids: Optional[LongTensor] = None
+        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
     ) -> FloatTensor:
         assert len(src) == 1 and len(src_mask) == 1
-        return self(src[0], src_mask[0], input_ids, rel_ids=rel_ids)
+        return self(src[0], src_mask[0], input_ids)
 
-    # ------------------------------------------------------------------
-    # Incremental KV-cache inference APIs (eval / no-grad only)
-    # ------------------------------------------------------------------
-
-    def init_decode_cache(
-        self,
-        src: FloatTensor,    # [B, h, w, D]
-        src_mask: LongTensor,  # [B, h, w]
-        max_len: int,
-    ) -> "DecoderKVCache":
-        """Pre-project encoder memory and allocate all KV/ARM buffers.
-
-        Must be called in eval mode under torch.no_grad().
-
-        Parameters
-        ----------
-        src : [B, h, w, D]   encoder feature map
-        src_mask : [B, h, w] True = padded
-        max_len : int
-
-        Returns
-        -------
-        DecoderKVCache  ready for the first transform_step call
-        """
-        from .transformer.kv_cache import DecoderKVCache
-        from einops import rearrange as _re
-
-        B, h, w, D = src.shape
-        S = h * w
-        num_layers = self.model.num_layers
-        num_heads = self.model.layers[0].self_attn.num_heads
-        head_dim = self.model.layers[0].self_attn.head_dim
-
-        # Flatten memory: [S, B, D]
-        memory = _re(src, "b h w d -> (h w) b d")
-        mem_mask = _re(src_mask, "b h w -> b (h w)")   # [B, S]
-
-        # Pre-project cross K/V for each layer
-        cross_k = []
-        cross_v = []
-        for layer in self.model.layers:
-            ck, cv = layer.multihead_attn.project_static_kv(memory)
-            cross_k.append(ck)  # [B, H, S, Hd]
-            cross_v.append(cv)
-
-        # Allocate self K/V buffers (filled incrementally)
-        device = src.device
-        dtype = src.dtype
-        self_k = [torch.zeros(B, num_heads, max_len, head_dim, device=device, dtype=dtype)
-                  for _ in range(num_layers)]
-        self_v = [torch.zeros(B, num_heads, max_len, head_dim, device=device, dtype=dtype)
-                  for _ in range(num_layers)]
-
-        # Allocate ARM fp32 running sums (num_layers - 1 inter-layer gaps)
-        num_gaps = max(num_layers - 1, 0)
-        cross_pre_sum = [torch.zeros(B, num_heads, S, dtype=torch.float32, device=device)
-                         for _ in range(num_gaps)]
-        cross_final_sum = [torch.zeros(B, num_heads, S, dtype=torch.float32, device=device)
-                           for _ in range(num_gaps)]
-
-        cache = DecoderKVCache(
-            self_k=self_k,
-            self_v=self_v,
-            cross_k=cross_k,
-            cross_v=cross_v,
-            cross_pre_sum=cross_pre_sum,
-            cross_final_sum=cross_final_sum,
-            beam_to_batch_idx=torch.arange(B, device=device, dtype=torch.long),
-            memory_key_padding_mask=mem_mask,
-            height=h,
-            cur_len=0,
-            max_len=max_len,
-            batch_size=B,
-            beam_size=1,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            head_dim=head_dim,
-        )
-        return cache
-
-    def transform_step(
-        self,
-        src: List[FloatTensor],
-        src_mask: List[LongTensor],
-        token_ids: LongTensor,          # [B_active, cur_len+1]  full prefix including new token
-        cache: "DecoderKVCache",
-        rel_ids_step: Optional[LongTensor] = None,  # [B_active, 1, cur_len+1]
-    ) -> FloatTensor:
-        """Incremental one-step decode using KV cache.
-
-        Must be called in eval mode under torch.no_grad().
-        Increments cache.cur_len after the forward pass.
-
-        Parameters
-        ----------
-        token_ids : [B_active, cur_len+1]  — only the last column is the new token
-        cache : DecoderKVCache
-        rel_ids_step : optional [B_active, 1, cur_len+1] tree relation ids for
-            the new query token attending to the current prefix
-
-        Returns
-        -------
-        logits : FloatTensor  [B_active, vocab_size]  (last token logits)
-        """
-        from .transformer.kv_cache import DecoderKVCache
-
-        B_active = token_ids.shape[0]
-        write_pos = cache.cur_len  # 0-indexed position being written
-
-        # Embed only the last (new) token
-        new_tok = token_ids[:, -1:]                           # [B_active, 1]
-        tgt_embed = self.word_embed(new_tok)                  # [B_active, 1, D]
-
-        # Add positional encoding at row `write_pos` only
-        pos_enc = self.pos_enc.pe[write_pos:write_pos + 1, :]  # [1, D]
-        tgt_embed = tgt_embed + pos_enc.unsqueeze(0)           # [B_active, 1, D]
-        tgt_embed = self.norm(tgt_embed)
-
-        # Seq-first for transformer layers: [1, B_active, D]
-        tgt_step = tgt_embed.transpose(0, 1).contiguous()
-
-        # Build tree-bias row if enabled
-        rel_bias_step = None
-        if self.use_tree_bias and self._tree_rel_bias is not None and rel_ids_step is not None:
-            # rel_ids_step: [B_active, 1, cur_len+1]
-            rel_bias_step = self._tree_rel_bias(rel_ids_step, flatten=True)  # [B_active*H, 1, cur_len+1]
-
-        # Run through decoder stack
-        out = self.model.forward_step(
-            tgt_step=tgt_step,
-            cache=cache,
-            rel_bias_step=rel_bias_step,
-        )  # [1, B_active, D]
-
-        out = out.transpose(0, 1)  # [B_active, 1, D]
-        logits = self.proj(out[:, 0, :])  # [B_active, vocab_size]
-
-        # Increment position counter
-        cache.cur_len += 1
-
-        return logits

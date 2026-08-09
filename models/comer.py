@@ -36,13 +36,13 @@ class CoMER(pl.LightningModule):
         dc                  = mcfg.get("dc", 32)
         cross_coverage      = mcfg.get("cross_coverage", True)
         self_coverage       = mcfg.get("self_coverage", True)
-
-        self.use_bidirectional = bool(mcfg.get("use_bidirectional", False))
-        use_tree_bias       = mcfg.get("use_tree_bias", True)
+        # LiSRB: tree-structure relative bias, applied to the L2R half of
+        # the bidirectional batch only (see models/decoder.py).
+        use_tree_bias         = mcfg.get("use_tree_bias", True)
         tree_bias_num_buckets = mcfg.get("tree_bias_num_buckets", 16)
-        tree_bias_mode      = mcfg.get("tree_bias_mode", "full")
-        tree_bias_layers    = mcfg.get("tree_bias_layers", "all")
-        tree_bias_rel_set   = mcfg.get("tree_bias_rel_set", "full")
+        tree_bias_mode        = mcfg.get("tree_bias_mode", "full")
+        tree_bias_layers      = mcfg.get("tree_bias_layers", "all")
+        tree_bias_rel_set     = mcfg.get("tree_bias_rel_set", "full")
 
         self.encoder = Encoder(
             d_model=d_model, 
@@ -68,13 +68,14 @@ class CoMER(pl.LightningModule):
             tree_bias_mode=tree_bias_mode,
             tree_bias_layers=tree_bias_layers,
             tree_bias_rel_set=tree_bias_rel_set,
-            use_bidirectional=self.use_bidirectional,
         )
 
     def forward(
-        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor, rel_ids: torch.LongTensor = None
-    ) -> FloatTensor:
-        """run img and tgt
+        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor,
+        return_aux: bool = False, capture_embed: bool = False,
+        capture_cross_attn: bool = False, capture_self_attn: bool = False
+    ):
+        """run img and bi-tgt
 
         Parameters
         ----------
@@ -83,19 +84,24 @@ class CoMER(pl.LightningModule):
         img_mask: LongTensor
             [b, h, w]
         tgt : LongTensor
-            [b, l] in L2R mode, [2b, l] in bidirectional mode
+            [2b, l]
 
         Returns
         -------
         FloatTensor
-            [b, l, vocab_size] in L2R mode, [2b, l, vocab_size] in bidirectional mode
+            [2b, l, vocab_size]
         """
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
-        if self.use_bidirectional:
-            feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
-            mask = torch.cat((mask, mask), dim=0)
+        feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
+        mask = torch.cat((mask, mask), dim=0)
 
-        out = self.decoder(feature, mask, tgt, rel_ids=rel_ids)
+        out = self.decoder(
+            feature, mask, tgt,
+            return_aux=return_aux,
+            capture_embed=capture_embed,
+            capture_cross_attn=capture_cross_attn,
+            capture_self_attn=capture_self_attn,
+        )
 
         return out
 
@@ -110,7 +116,7 @@ class CoMER(pl.LightningModule):
         temperature: float,
         **kwargs,
     ) -> List[Hypothesis]:
-        """run configured beam search for given img
+        """run bi-direction beam search for given img
 
         Parameters
         ----------
@@ -127,5 +133,5 @@ class CoMER(pl.LightningModule):
         """
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
         return self.decoder.beam_search(
-            [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature
+            [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature, return_nbest=kwargs.get("return_nbest", False)
         )
