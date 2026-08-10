@@ -37,6 +37,30 @@ def test_config_has_tree_bias_block():
     assert mcfg["tree_bias_rel_set"] == "core"
 
 
+def test_config_uses_compact_thresholded_validation_logging():
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    cfg = config["analysis_logging"]
+    assert cfg["phases"] == ["val", "test"]
+    assert cfg["start_after"] == {
+        "monitor": "val_ExpRate",
+        "threshold": 0.57,
+        "phases": ["val"],
+    }
+    assert cfg["train"]["enabled"] is False
+    assert cfg["val"]["enabled"] is True
+    assert cfg["test"]["enabled"] is False
+    assert cfg["csv_core"] is True
+    assert cfg["jsonl_detail"] is False
+    assert cfg["token_detail"] is False
+    assert cfg["teacher_forced_top1"] is False
+    assert cfg["topk_preds"] is False
+    assert cfg["capture_embed"] is False
+    assert cfg["capture_cross_attn"] is False
+    assert cfg["capture_self_attn"] is False
+
+
 def test_lit_comer_instantiates_end_to_end_from_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)

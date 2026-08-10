@@ -147,42 +147,47 @@ rclone:
   fail_on_error: false
 
 analysis_logging:
-  # Master switch for compact train analysis logs. Options: true, false.
+  # Keep the master switch on so validation logging can open dynamically.
   enabled: true
-  # Directory for compact CSV/JSONL logs. Final files are grouped by run_id.
   log_dir: analysis_logs
-  # Runtime override from CLI; do not hardcode final experiment names here.
   run_id: null
-  # Runtime override from CLI; used in filenames only, not repeated in CSV/JSONL.
   seeds: null
-  # Default target phase. Options: [train], [val], [test], or tested combinations.
-  phases: [train]
+  phases: [val, test]
 
-  # Active compact logging features.
+  # The crossing epoch opens uploads immediately. Per-sample validation logs
+  # start on the next validation because val_ExpRate is known only at epoch end.
+  start_after:
+    monitor: val_ExpRate
+    threshold: 0.57
+    phases: [val]
+
+  # Compact validation CSV only.
   csv_core: true
-  jsonl_detail: true
-  token_detail: true
-  token_topk: 5
-  teacher_forced_top1: true
+  jsonl_detail: false
+  token_detail: false
+  token_topk: 1
+  teacher_forced_top1: false
   skip_sanity_check: true
 
-  # Options for train analysis. Keep decode_autoregressive false for compact teacher-forced logs.
   train:
-    enabled: true
+    enabled: false
     log_every_n_steps: 1
     max_batches_per_epoch: null
     max_samples_per_epoch: null
     decode_autoregressive: false
-    log_csv_without_decode: true
-    jsonl_detail: true
+    log_csv_without_decode: false
+    jsonl_detail: false
     topk_preds: false
 
-  # Validation analysis is off by default. Enable only with matching schema tests.
   val:
-    enabled: false
+    enabled: true
     max_samples_per_epoch: null
+    csv_core: true
+    jsonl_detail: false
+    token_detail: false
+    teacher_forced_top1: false
+    topk_preds: false
 
-  # Test analysis is off by default. Enable only with matching schema tests.
   test:
     enabled: false
     max_samples_per_epoch: null
@@ -200,20 +205,20 @@ analysis_logging:
   full_cross_attn_map: false
   full_self_attn_map: false
   capture_every_n_epochs: 0
-  capture_max_samples_per_epoch: 64
+  capture_max_samples_per_epoch: 0
   cross_attn:
     store: summary
     max_tokens: 64
     max_heads: 4
   self_attn:
     store: summary
-    layers: all
-    max_tokens: 64
-    max_heads: 4
-    topk_keys: 5
-    include_token_labels: true
+    layers: last
+    max_tokens: 0
+    max_heads: 0
+    topk_keys: 0
+    include_token_labels: false
 
   # Off by default. Enabling currently fails fast before backward unless a safe
   # per-sample grad implementation is wired into train logging.
   grad_norm_sample: false
-  grad_norm_max_samples: 2
+  grad_norm_max_samples: 0

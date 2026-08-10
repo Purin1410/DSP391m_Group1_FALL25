@@ -38,6 +38,19 @@ def checkpoint_epoch_from_name(name: str, run_name: str) -> Optional[int]:
     return int(match.group("epoch"))
 
 
+def analysis_epoch_from_name(name: str, run_name: str) -> Optional[int]:
+    path_name = str(name).replace("\\", "/")
+    if "_rank_" in Path(path_name).name:
+        return None
+    pattern = re.compile(
+        rf"(^|/){re.escape(run_name)}_[^/]+_(?P<epoch>\d+)\.(?:csv|jsonl)$"
+    )
+    match = pattern.search(path_name)
+    if match is None:
+        return None
+    return int(match.group("epoch"))
+
+
 def select_latest_checkpoint(items: List[Dict[str, Any]], run_name: str) -> Optional[Dict[str, Any]]:
     candidates = []
     for item in items:

@@ -29,6 +29,11 @@ DEFAULT_ANALYSIS_CFG: Dict[str, Any] = {
     "token_detail": True,
     "token_topk": 5,
     "teacher_forced_top1": True,
+    "start_after": {
+        "monitor": "val_ExpRate",
+        "threshold": 0.57,
+        "phases": ["val"],
+    },
     "topk_preds": False,
     "nbest_k": 0,
     "train": {

@@ -23,6 +23,7 @@ class LitCoMER(pl.LightningModule):
         alpha: float = 1.0,
         early_stopping: bool = True,
         temperature: float = 1.0,
+        val_beam_size: Optional[int] = None,
         vocab_info: VocabInfo = None,
     ):
         super().__init__()
@@ -30,6 +31,18 @@ class LitCoMER(pl.LightningModule):
         self.vocab_info = vocab_info
         from utils.analysis_logging import get_analysis_logging_cfg
         self.analysis_logging_cfg = get_analysis_logging_cfg(config)
+        gate_cfg = self.analysis_logging_cfg.get("start_after", {}) or {}
+        self._analysis_gate_monitor = str(gate_cfg.get("monitor", "val_ExpRate"))
+        gate_threshold = gate_cfg.get("threshold")
+        self._analysis_gate_threshold = (
+            None if gate_threshold is None else float(gate_threshold)
+        )
+        gate_phases = gate_cfg.get("phases", ["val"])
+        if isinstance(gate_phases, str):
+            gate_phases = [gate_phases]
+        self._analysis_gate_phases = {str(phase) for phase in gate_phases}
+        self._analysis_gate_open = self._analysis_gate_threshold is None
+        self._analysis_gate_activation_epoch = None
         self.config = config
         # Ignore vocab_info in save_hyperparameters to avoid deep serialization issues
         self.save_hyperparameters(ignore=["vocab_info"])
@@ -107,9 +120,52 @@ class LitCoMER(pl.LightningModule):
                 "analysis_logging.grad_norm_sample is off by default and is not safely implemented for LitCoMER."
             )
 
-        self._analysis_log_train_batch(batch, out_hat, batch_idx)
+        if self.analysis_phase_active("train"):
+            self._analysis_log_train_batch(batch, out_hat, batch_idx)
 
         return loss
+
+    @staticmethod
+    def _metric_to_float(metric):
+        if metric is None:
+            return None
+        try:
+            if isinstance(metric, torch.Tensor):
+                metric = metric.detach()
+                if metric.numel() != 1:
+                    return None
+                metric = metric.cpu().item()
+            return float(metric)
+        except (TypeError, ValueError):
+            return None
+
+    def analysis_phase_active(self, phase: str) -> bool:
+        from utils.analysis_logging import should_log_phase
+
+        cfg = getattr(self, "analysis_logging_cfg", None) or {}
+        if not should_log_phase(cfg, phase):
+            return False
+        if str(phase) not in self._analysis_gate_phases:
+            return True
+        return bool(self._analysis_gate_open)
+
+    def update_analysis_gate(self, metric=None) -> bool:
+        """Open the monotonic analysis/upload gate after a real validation epoch."""
+        if self._analysis_gate_open:
+            return False
+        trainer = self._analysis_trainer_or_none()
+        if trainer is not None and getattr(trainer, "sanity_checking", False):
+            return False
+        if metric is None and trainer is not None:
+            metric = getattr(trainer, "callback_metrics", {}).get(
+                self._analysis_gate_monitor
+            )
+        score = self._metric_to_float(metric)
+        if score is None or score < self._analysis_gate_threshold:
+            return False
+        self._analysis_gate_open = True
+        self._analysis_gate_activation_epoch = int(self.current_epoch)
+        return True
 
     def validation_step(self, batch: Batch, _):
         out_hat = self(batch.imgs, batch.mask, batch.tgt)
@@ -124,12 +180,18 @@ class LitCoMER(pl.LightningModule):
             sync_dist=True,
         )
 
+        analysis_active = self.analysis_phase_active("val")
         cfg = getattr(self, "analysis_logging_cfg", None) or {}
         from utils.analysis_logging import should_log_topk
-        topk_enabled = should_log_topk(cfg, "val", trainer=self._analysis_trainer_or_none())
+        topk_enabled = analysis_active and should_log_topk(
+            cfg, "val", trainer=self._analysis_trainer_or_none()
+        )
 
         beam_results = self.approximate_joint_search(
-            batch.imgs, batch.mask, return_nbest=topk_enabled
+            batch.imgs,
+            batch.mask,
+            return_nbest=topk_enabled,
+            beam_size=self.hparams.get("val_beam_size", None),
         )
 
         if topk_enabled and beam_results and hasattr(beam_results[0], 'candidates'):
@@ -139,8 +201,9 @@ class LitCoMER(pl.LightningModule):
             hyps = beam_results
             nbest_outputs = None
 
-        self._analysis_log_batch("val", batch, out_hat, hyps, nbest_outputs=nbest_outputs)
-        self._maybe_log_analysis_aux(batch, "val")
+        if analysis_active:
+            self._analysis_log_batch("val", batch, out_hat, hyps, nbest_outputs=nbest_outputs)
+            self._maybe_log_analysis_aux(batch, "val")
 
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
         self.log(
@@ -288,11 +351,22 @@ class LitCoMER(pl.LightningModule):
         seed = self.config.get("seed_everything", "")
         seeds = str(cfg.get("seeds") or seed)
 
-        # 3. Handle bidirectional tensors
+        # 3. Handle bidirectional tensors only when token-level detail needs
+        # teacher-forced logits. Compact validation CSV avoids these slices.
         batch_size = len(batch.img_bases)
-        l_logits, l_targets = select_l2r(logits_for_logging, getattr(batch, "fusion_out", getattr(batch, "out", None)), batch_size)
-
         phase_cfg = get_phase_cfg(cfg, phase)
+        log_detail = should_log_detail(cfg, phase)
+        log_token_detail = bool(phase_cfg.get("token_detail", False))
+        log_teacher_forced_top1 = bool(phase_cfg.get("teacher_forced_top1", False))
+        if log_detail and (log_token_detail or log_teacher_forced_top1):
+            l_logits, l_targets = select_l2r(
+                logits_for_logging,
+                getattr(batch, "fusion_out", getattr(batch, "out", None)),
+                batch_size,
+            )
+        else:
+            l_logits, l_targets = None, None
+
         nbest_k = phase_cfg.get("nbest_k", 10)
         topk_enabled = should_log_topk(cfg, phase, trainer=trainer)
         has_decode = hyps is not None
@@ -357,9 +431,7 @@ class LitCoMER(pl.LightningModule):
 
         # 5. JSONL token details
         jsonl_rows = []
-        if should_log_detail(cfg, phase):
-            log_token_detail = bool(phase_cfg.get("token_detail", False))
-            log_teacher_forced_top1 = bool(phase_cfg.get("teacher_forced_top1", False))
+        if log_detail:
             if log_token_detail or log_teacher_forced_top1 or (topk_enabled and nbest_outputs is not None):
                 token_topk = phase_cfg.get("token_topk", 5)
                 token_details = [[] for _ in range(batch_size)]
@@ -591,13 +663,20 @@ class LitCoMER(pl.LightningModule):
     def on_validation_epoch_end(self):
         self._step_plateau_after_warmup()
         cfg = getattr(self, "analysis_logging_cfg", None) or {}
-        if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
+        if (
+            self.analysis_phase_active("val")
+            and cfg.get("merge_on_epoch_end", False)
+        ):
             from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
             run_id = resolve_analysis_run_id(cfg, "CoMER", self.config.get("seed_everything", ""))
             seeds = str(cfg.get("seeds") or self.config.get("seed_everything", ""))
             epoch = int(self.current_epoch)
             rank, _ = get_dist_info()
             maybe_merge_shards(cfg, run_id, seeds, epoch, "val", rank)
+
+        # The aggregate metric is available only now, so this opens logging for
+        # the next validation cycle. Upload callbacks can use it immediately.
+        self.update_analysis_gate()
     
     def on_train_epoch_start(self):
         sampler = None
@@ -821,6 +900,10 @@ class LitCoMER(pl.LightningModule):
                 else None
             ),
         }
+        checkpoint["analysis_logging_gate_state"] = {
+            "open": bool(self._analysis_gate_open),
+            "activation_epoch": self._analysis_gate_activation_epoch,
+        }
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         state = checkpoint.get("lit_comer_warmup_state", {})
@@ -829,14 +912,29 @@ class LitCoMER(pl.LightningModule):
         self._warmup_finished = state.get("warmup_finished", self._warmup_finished)
         self._loaded_plateau_scheduler_state = state.get("plateau_scheduler", None)
 
+        gate_state = checkpoint.get("analysis_logging_gate_state", {})
+        self._analysis_gate_open = bool(
+            gate_state.get("open", self._analysis_gate_open)
+        )
+        activation_epoch = gate_state.get(
+            "activation_epoch", self._analysis_gate_activation_epoch
+        )
+        self._analysis_gate_activation_epoch = (
+            None if activation_epoch is None else int(activation_epoch)
+        )
+
     def approximate_joint_search(
-        self, 
-        img: FloatTensor, 
+        self,
+        img: FloatTensor,
         mask: LongTensor,
         return_nbest: bool = False,
+        beam_size: Optional[int] = None,
     ):
+        hparams = dict(self.hparams)
+        if beam_size is not None:
+            hparams["beam_size"] = beam_size
         return self.comer_model.beam_search(
-            img, mask, **self.hparams, return_nbest=return_nbest
+            img, mask, **hparams, return_nbest=return_nbest
         )
 
     def configure_optimizers(self):

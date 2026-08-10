@@ -10,7 +10,9 @@ import argparse
 from sconf import Config
 from pathlib import Path
 from utils.remote_sync import (
+    analysis_epoch_from_name,
     build_remote_run_dir,
+    checkpoint_epoch_from_name,
     collect_uploadable_files,
     ensure_remote_dir,
     find_and_download_latest_checkpoint,
@@ -45,18 +47,34 @@ def _lightning_barrier(trainer, name=None):
         else:
             dist.barrier()
 
+def _metric_to_float(metric):
+    if metric is None:
+        return None
+    try:
+        if hasattr(metric, "detach"):
+            metric = metric.detach()
+            if metric.numel() != 1:
+                return None
+            metric = metric.cpu().item()
+        return float(metric)
+    except (TypeError, ValueError):
+        return None
+
+
 class MoreValidationCallback(pl.Callback):
-    def __init__(self, monitor="val_ExpRate"):
-        self.monitor = monitor
+    def __init__(self, monitor="val_ExpRate", threshold=0.57):
+        self.monitor = str(monitor)
+        self.threshold = float(threshold)
 
     def on_validation_epoch_end(self, trainer, pl_module):
-        metric = trainer.callback_metrics.get(self.monitor)
-        if metric is not None:
-            if metric > 0.57:
-                trainer.check_val_every_n_epoch = 1
+        if getattr(trainer, "sanity_checking", False):
+            return
+        metric = _metric_to_float(trainer.callback_metrics.get(self.monitor))
+        if metric is not None and metric >= self.threshold:
+            trainer.check_val_every_n_epoch = 1
 
 class RcloneUploadCallback(Callback):
-    """Upload completed checkpoints and merged analysis logs only."""
+    """Upload checkpoints and validation logs only after the metric gate opens."""
 
     def __init__(
         self,
@@ -65,6 +83,8 @@ class RcloneUploadCallback(Callback):
         remote_run_dir,
         rclone_cfg=None,
         wandb_cfg=None,
+        monitor="val_ExpRate",
+        threshold=0.57,
     ):
         super().__init__()
         self.checkpoint_dir = Path(checkpoint_dir)
@@ -72,80 +92,126 @@ class RcloneUploadCallback(Callback):
         self.remote_run_dir = remote_run_dir
         self.rclone_cfg = rclone_cfg or {}
         self.wandb_cfg = wandb_cfg or {}
+        self.monitor = str(monitor)
+        self.threshold = float(threshold)
         self.every_n_epochs = _cfg_get(self.rclone_cfg, "every_n_epochs", 1)
         self.upload_on_train_end = _cfg_get(self.rclone_cfg, "upload_on_train_end", True)
         self._last_upload_epoch = None
+        self._activation_epoch = None
 
-    def on_train_epoch_end(self, trainer, pl_module):
+    def _sync_gate_state(self, trainer, pl_module):
+        if getattr(trainer, "sanity_checking", False):
+            return False
+
+        gate_open = bool(getattr(pl_module, "_analysis_gate_open", False))
+        if not gate_open:
+            return False
+
+        activation_epoch = getattr(pl_module, "_analysis_gate_activation_epoch", None)
+        if activation_epoch is None:
+            activation_epoch = int(trainer.current_epoch)
+        if self._activation_epoch is None:
+            self._activation_epoch = int(activation_epoch)
+        else:
+            self._activation_epoch = min(
+                self._activation_epoch, int(activation_epoch)
+            )
+        return True
+
+    def on_validation_end(self, trainer, pl_module):
+        if not self._sync_gate_state(trainer, pl_module):
+            return
         if self.every_n_epochs is None:
             return
-        epoch_num = int(trainer.current_epoch) + 1
-        if epoch_num % int(self.every_n_epochs) == 0:
-            self._merge_and_upload(trainer, pl_module)
-            self._last_upload_epoch = int(trainer.current_epoch)
+        activation_epoch = int(self._activation_epoch)
+        current_epoch = int(trainer.current_epoch)
+        eligible_validation_index = current_epoch - activation_epoch + 1
+        if eligible_validation_index % int(self.every_n_epochs) != 0:
+            return
+        self._upload_on_all_ranks(trainer, pl_module)
+        self._last_upload_epoch = current_epoch
 
     def on_train_end(self, trainer, pl_module):
         if not self.upload_on_train_end:
             return
+        if not self._sync_gate_state(trainer, pl_module):
+            return
         current_epoch = int(getattr(trainer, "current_epoch", 0))
         if self._last_upload_epoch == current_epoch:
             return
-        self._merge_and_upload(trainer, pl_module)
+        self._upload_on_all_ranks(trainer, pl_module)
         self._last_upload_epoch = current_epoch
 
-    def _merge_and_upload(self, trainer, pl_module):
-        from utils.analysis_logging import (
-            flush_all_buffers,
-            get_dist_info,
-            maybe_merge_shards,
-            resolve_analysis_run_id,
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+        return {
+            "activation_epoch": self._activation_epoch,
+            "last_upload_epoch": self._last_upload_epoch,
+        }
+
+    def on_load_checkpoint(self, trainer, pl_module, callback_state):
+        activation_epoch = callback_state.get("activation_epoch")
+        last_upload_epoch = callback_state.get("last_upload_epoch")
+        self._activation_epoch = (
+            None if activation_epoch is None else int(activation_epoch)
+        )
+        self._last_upload_epoch = (
+            None if last_upload_epoch is None else int(last_upload_epoch)
         )
 
-        # local process buffers are per-rank; every rank must flush its own buffers
+    def _upload_on_all_ranks(self, trainer, pl_module):
+        from utils.analysis_logging import flush_all_buffers, get_dist_info
+
         flush_all_buffers()
-
-        cfg = getattr(pl_module, "analysis_logging_cfg", None) or {}
         rank, world_size = get_dist_info()
-
-        if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
-            run_id = resolve_analysis_run_id(cfg, "CoMER", pl_module.config.get("seed_everything", ""))
-            seeds = str(cfg.get("seeds") or pl_module.config.get("seed_everything", ""))
-            epoch = int(trainer.current_epoch)
-            # IMPORTANT: all ranks call this; rank 0 merges, others wait/return inside function.
-            maybe_merge_shards(cfg, run_id, seeds, epoch, "train", rank)
-
-        # Keep non-zero ranks parked until rank 0 upload finishes, so all ranks leave callback together.
         if rank == 0:
-            self._upload_completed(trainer)
-
+            self._upload_completed(trainer, pl_module)
         if world_size > 1:
-            # trainer.strategy.barrier("analysis_upload_done")
             _lightning_barrier(trainer, "analysis_upload_done")
 
-    
-    def _upload_completed(self, trainer):
-        if not trainer.is_global_zero:
-            return
-        pl_module = trainer.lightning_module
-        run_name = None
-        if pl_module is not None:
-            cfg = getattr(pl_module, "analysis_logging_cfg", None) or {}
-            from utils.analysis_logging import resolve_analysis_run_id
-            run_name = resolve_analysis_run_id(cfg, "CoMER", pl_module.config.get("seed_everything", ""))
-        
-        if not run_name:
-            run_name = _cfg_get(self.wandb_cfg, "name", None)
-
+    def _eligible_files(self, run_name):
         paths = []
         if _cfg_get(self.rclone_cfg, "upload_checkpoints", True):
             paths.append(self.checkpoint_dir)
         if _cfg_get(self.rclone_cfg, "upload_analysis_logs", True):
             paths.append(self.analysis_dir)
-        if not paths:
-            return
         files = collect_uploadable_files(paths, run_name=run_name)
+        if self._activation_epoch is None:
+            return []
+
+        eligible = []
+        for path in files:
+            if path.suffix == ".ckpt":
+                epoch = checkpoint_epoch_from_name(path.name, run_name)
+            else:
+                epoch = analysis_epoch_from_name(path.name, run_name)
+            if epoch is not None and epoch >= self._activation_epoch:
+                eligible.append(path)
+        return eligible
+
+    def _upload_completed(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
+        cfg = getattr(pl_module, "analysis_logging_cfg", None) or {}
+        from utils.analysis_logging import resolve_analysis_run_id
+        run_name = resolve_analysis_run_id(
+            cfg, "CoMER", pl_module.config.get("seed_everything", "")
+        )
+        if not run_name:
+            run_name = _cfg_get(self.wandb_cfg, "name", None)
+
+        files = self._eligible_files(run_name)
         if not files:
             return
+
+        wandb_ok = True
+        if _cfg_get(self.wandb_cfg, "upload_artifacts", True):
+            wandb_run = getattr(getattr(trainer, "logger", None), "experiment", None)
+            wandb_ok = log_wandb_files(
+                wandb_run,
+                files,
+                fail_on_error=_cfg_get(self.wandb_cfg, "fail_on_error", False),
+                run_name=run_name,
+            )
 
         rclone_ok = True
         if _cfg_get(self.rclone_cfg, "enabled", True):
@@ -155,16 +221,6 @@ class RcloneUploadCallback(Callback):
                 rclone_command=_cfg_get(self.rclone_cfg, "command", "rclone"),
                 copy_flags=_cfg_get(self.rclone_cfg, "copy_flags", ["--update", "--verbose", "--no-traverse"]),
                 fail_on_error=_cfg_get(self.rclone_cfg, "fail_on_error", False),
-                run_name=run_name,
-            )
-
-        wandb_ok = True
-        if _cfg_get(self.wandb_cfg, "upload_artifacts", True):
-            wandb_run = getattr(getattr(trainer, "logger", None), "experiment", None)
-            wandb_ok = log_wandb_files(
-                wandb_run,
-                files,
-                fail_on_error=_cfg_get(self.wandb_cfg, "fail_on_error", False),
                 run_name=run_name,
             )
 
@@ -361,6 +417,7 @@ def train(config):
         alpha=config.model.alpha,
         early_stopping=config.model.early_stopping,
         temperature=config.model.temperature,
+        val_beam_size=config.model.get("val_beam_size", None),
         vocab_info=data_module.vocab.get_info(),
     )
 
@@ -391,17 +448,33 @@ def train(config):
         mode                = config.trainer.callbacks[1].init_args.mode,
     )
 
+    gate_cfg = _cfg_get(config.analysis_logging, "start_after", {})
+    gate_monitor = _cfg_get(gate_cfg, "monitor", "val_ExpRate")
+    gate_threshold = _cfg_get(gate_cfg, "threshold", 0.57)
+    if gate_threshold is None:
+        raise ValueError(
+            "analysis_logging.start_after.threshold must be set when rclone "
+            "uploads are threshold-gated"
+        )
+
     rclone_callback = RcloneUploadCallback(
         checkpoint_dir      = ckpt_dir,
         analysis_dir        = analysis_dir,
         remote_run_dir      = remote_run_dir,
         rclone_cfg          = rclone_cfg,
         wandb_cfg           = _cfg_get(config, "wandb", {}),
+        monitor             = gate_monitor,
+        threshold           = gate_threshold,
     )
 
     callback = [lr_callback, checkpoint_callback, conditional_last_callback, rclone_callback]
 
-    callback.append(MoreValidationCallback())
+    callback.append(
+        MoreValidationCallback(
+            monitor=gate_monitor,
+            threshold=gate_threshold,
+        )
+    )
     
     if config.trainer.get("log_grad_norm", False):
         grad_norm_callback = GradNormCallback()
@@ -415,6 +488,7 @@ def train(config):
         max_epochs              = config.trainer.max_epochs,
         logger                  = logger,
         deterministic           = config.trainer.deterministic,
+        precision               = config.trainer.get("precision", 32),
         callbacks               = callback,
         # default_root_dir        = config.trainer.default_root_dir,
         resume_from_checkpoint  = config.trainer.resume_from_checkpoint,
